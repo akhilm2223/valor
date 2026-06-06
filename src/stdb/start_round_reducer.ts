@@ -10,19 +10,4 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
-import {
-  Vec3,
-  Vec2,
-} from "./types";
-
-export default {
-  get aim() {
-    return Vec3;
-  },
-  get lean() {
-    return Vec2;
-  },
-  crouch: __t.bool(),
-  firePressed: __t.bool(),
-  reload: __t.bool(),
-};
+export default {};

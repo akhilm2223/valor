@@ -16,11 +16,13 @@
 
 import { create } from "zustand";
 import {
+  type Capsule,
   type Controls,
   type Entity,
   type GameEvent,
   type Transform,
   type Vec3,
+  CAPSULE,
   LOCAL_ID,
   MAX_HEALTH,
   MAG_SIZE,
@@ -52,6 +54,23 @@ export const transforms: Record<string, Transform> = {};
 
 export function makeTransform(pos: Vec3, yaw = 0): Transform {
   return { pos: [...pos] as Vec3, yaw, pitch: 0, forwardSpeed: 0, lateralSpeed: 0, grounded: true, crouchAmount: 0 };
+}
+
+/** Build the world-space hit capsule for an entity from its live transform.
+ *  `pos` is the capsule CENTER (PlayerController/Bot convention); the core
+ *  segment runs ±halfHeight on Y and `halfHeight` shrinks with crouch. Shared by
+ *  the hitscan ray-vs-capsule test and bot colliders so a shot tests exactly the
+ *  volume the character occupies. Returns null if the entity has no transform. */
+export function capsuleFor(id: string): Capsule | null {
+  const t = transforms[id];
+  if (!t) return null;
+  const halfHeight = CAPSULE.standHalfHeight + (CAPSULE.crouchHalfHeight - CAPSULE.standHalfHeight) * t.crouchAmount;
+  const [x, y, z] = t.pos;
+  return {
+    base: [x, y - halfHeight, z],
+    tip: [x, y + halfHeight, z],
+    radius: CAPSULE.radius,
+  };
 }
 
 // ── useGame ──────────────────────────────────────────────────────────────

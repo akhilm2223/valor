@@ -3,6 +3,7 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls, Environment, Stats, Sky, useGLTF } from "@react-three/drei";
 import { Group, Vector3, Mesh } from "three";
 import { FitModel } from "../Models";
+import { Scatter } from "../Scatter";
 import { Gun } from "../Gun";
 import { useKeys } from "./useKeys";
 import { Bullets, spawnBullet } from "./Bullets";
@@ -26,12 +27,14 @@ const CLIP: Record<string, string> = {
   crouch: "/animations/crouch_idle.glb",
 };
 
-// The full Chicken Gun town map (24 MB original, not the carved studio plaza).
+// The COMPRESSED arena: carved to one plaza in Blender + optimized to 1.6 MB / 85
+// draw calls (NOT the 24 MB raw arena_chickengun.glb — that tanks FPS). This is the
+// map work done before; pair it with Scatter for the full clean scene.
 function GameArena() {
-  const { scene } = useGLTF("/models/arena_chickengun.glb");
+  const { scene } = useGLTF("/models/arena_opt.glb");
   return <primitive object={scene} />;
 }
-useGLTF.preload("/models/arena_chickengun.glb");
+useGLTF.preload("/models/arena_opt.glb");
 
 function Player() {
   const keys = useKeys();
@@ -153,6 +156,7 @@ function Scene() {
       <Suspense fallback={null}>
         <group ref={arena}>
           <GameArena />
+          <Scatter />
         </group>
         <Player />
         <Bullets colliders={arena} />

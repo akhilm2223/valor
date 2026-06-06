@@ -1,8 +1,8 @@
 import { useGLTF } from "@react-three/drei";
 
-// The Chicken Gun map, optimized to 3.5 MB (WebP textures @ 512px + Draco).
-// Source 24 MB original kept at arena_chickengun.glb for reference.
-// Re-optimize: see README.md "Optimizing the arena".
+// The Chicken Gun map, carved to one plaza in Blender then optimized: 1.6 MB,
+// 85 draw calls (was 24 MB / 785). WebP@512 + Draco + BLEND->OPAQUE material audit.
+// Source 24 MB original kept at arena_chickengun.glb. Re-carve: see README "Optimizing the arena".
 export function Arena() {
   const { scene } = useGLTF("/models/arena_opt.glb");
   return <primitive object={scene} />;

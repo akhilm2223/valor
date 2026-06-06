@@ -54,6 +54,16 @@ function CombatTicker() {
   return null;
 }
 
+// Explicit render pass. The Weapon's recoil uses a positive-priority useFrame
+// (priority 10), which switches R3F into MANUAL render mode and disables its
+// automatic render (otherwise the canvas stays black). So we render the scene
+// ourselves at the HIGHEST priority — after movement (physics step), all
+// priority-0 updates, and the recoil offset have run for the frame.
+function RenderPass() {
+  useFrame(({ gl, scene, camera }) => gl.render(scene, camera), 1000);
+  return null;
+}
+
 // Dev-only handle so an automated browser smoke test can exercise the REAL wired
 // modules (raycast against the live scene, apply damage) — stripped from prod.
 function DevHook() {
@@ -103,6 +113,7 @@ function Scene() {
 
       <InputController />
       <DevHook />
+      <RenderPass />
     </>
   );
 }

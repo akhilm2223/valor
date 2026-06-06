@@ -66,25 +66,16 @@ const result = await page.evaluate(() => {
   // Objective render proof: force one render and read the renderer's draw stats
   // + a center-pixel sample. triangles>0 ⇒ the scene is genuinely drawing
   // geometry (independent of any compositor/screenshot capture quirk).
+  // Read R3F's OWN last auto-rendered frame (NO manual gl.render here) — this is
+  // exactly what the user sees. With the render-pass fix the buffer holds the
+  // scene; before the fix it was blank/black.
   let render = null;
   try {
-    const { gl, scene, camera } = w;
-    // Aim the capture camera at the nearest bot from the player's eye so the
-    // screenshot clearly shows a bot standing on the ground (this synchronous
-    // render won't be overwritten by PlayerController until the next frame).
-    const lp = transforms[LOCAL_ID].pos;
-    const bp = transforms[bots[0]].pos;
-    camera.position.set(lp[0], lp[1] + 0.6, lp[2]);
-    camera.lookAt(bp[0], bp[1], bp[2]);
-    camera.updateMatrixWorld();
-    gl.render(scene, camera);
+    const { gl } = w;
     const info = gl.info.render;
     const dctx = gl.getContext();
     const px = new Uint8Array(4);
     dctx.readPixels(Math.floor(dctx.drawingBufferWidth / 2), Math.floor(dctx.drawingBufferHeight / 2), 1, 1, dctx.RGBA, dctx.UNSIGNED_BYTE, px);
-    // Grab the just-rendered frame synchronously (preserveDrawingBuffer in DEV)
-    // before the browser swaps buffers — reliable even when the compositor
-    // screenshots come out blank.
     const png = document.querySelector("canvas").toDataURL("image/png");
     render = { calls: info.calls, triangles: info.triangles, centerPixel: [px[0], px[1], px[2], px[3]], png };
   } catch (e) {

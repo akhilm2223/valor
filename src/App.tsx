@@ -87,6 +87,25 @@ export function App() {
         <Stats />
       </Canvas>
 
+      {/* Jump to the playable FPS (PASS 1). */}
+      <a
+        href="?game"
+        style={{
+          position: "absolute",
+          top: 12,
+          left: 12,
+          color: "#fff",
+          font: "600 14px system-ui, sans-serif",
+          textDecoration: "none",
+          background: "#3a7bff",
+          padding: "9px 14px",
+          borderRadius: 9,
+          boxShadow: "0 2px 10px rgba(0,0,0,0.35)",
+        }}
+      >
+        ▶ Play Game
+      </a>
+
       {/* Control panel — move the model + play any clip */}
       <div
         style={{

@@ -8,7 +8,7 @@ import { Scatter } from "../Scatter";
 import { Gun } from "../Gun";
 import { useKeys } from "./useKeys";
 import { Bullets, spawnBullet, spawnMuzzle } from "./Bullets";
-import { useWeapon } from "./weapon";
+import { useWeapon } from "./arenaWeapon";
 
 // Weapon tuning (semi-auto pistol)
 const MAG = 12;

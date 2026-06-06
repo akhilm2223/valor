@@ -40,15 +40,29 @@ import { Gun } from "../Gun";
 import { AnimatedCharacter } from "./AnimatedCharacter";
 import { CAPSULE, resolveAnimState, type Vec3 } from "./contracts";
 import { makeEntity, transforms, useGame } from "./stores";
+import { raycastShot } from "./hitscan";
 
-// Floor height the bots stand on (feet Y). Default 0 — see header; tune in Phase 3.
-const FLOOR_Y = 0;
+// Measured plaza floor (feet Y) of arena_opt.glb near the player spawn — the
+// player capsule settles with feet at ~-3.76. Bots are placed on this same
+// contiguous slab; the per-bot floor-cast refines each one but is deliberately
+// SHORT and starts just above this level so firstHitOnly snaps to the plaza
+// rather than punching through to a lower carved layer (the map has overhangs /
+// layered floors — see Models.tsx).
+const FLOOR_Y = -3.76;
+
+/** Refine the arena floor Y under (x,z) by casting DOWN from just above the
+ *  plaza onto the world BVH. Short range so it can't fall through to a lower
+ *  layer. Only world hits count. Returns null if nothing is just below. */
+function floorYAt(x: number, z: number): number | null {
+  const hit = raycastShot([x, FLOOR_Y + 2.5, z], [0, -1, 0], 5);
+  return hit && hit.kind === "world" ? hit.point[1] : null;
+}
 // Distance from feet to capsule center (so the hit capsule wraps the body).
 const CENTER_OFFSET = CAPSULE.standHalfHeight + CAPSULE.radius; // 0.9
 
 // Patrol: gently slide ±AMPLITUDE on local X over PERIOD seconds so locomotion
 // anim + moving-target hitscan both get exercised without the bot wandering off.
-const PATROL_AMPLITUDE = 2.0; // metres each side of the home X
+const PATROL_AMPLITUDE = 1.2; // metres each side of the home X (stay on the slab)
 const PATROL_PERIOD = 4.0; // seconds for a full there-and-back cycle
 
 // The player spawns near [0,_,6] looking -Z; bots face roughly toward it.
@@ -76,10 +90,12 @@ function yawToward(from: Vec3, to: Vec3): number {
 
 /** Build the default 3-bot layout, spread in front of the player spawn. */
 function defaultSpecs(count: number): BotSpec[] {
+  // In front of the player (spawn [0,_,6], looking -Z), close enough to stay on
+  // the same plaza slab and frame nicely in the spawn view.
   const homes: Vec3[] = [
-    [-3, FLOOR_Y, 0],
-    [0, FLOOR_Y, -3],
-    [3, FLOOR_Y, -1],
+    [-2.2, FLOOR_Y, 3.0],
+    [0, FLOOR_Y, 1.5],
+    [2.2, FLOOR_Y, 3.0],
   ];
   const specs: BotSpec[] = [];
   for (let i = 0; i < count; i++) {
@@ -108,6 +124,10 @@ export function Bots({ count = 3 }: { count?: number }) {
   useEffect(() => {
     const game = useGame.getState();
     for (const s of specs) {
+      // Snap each bot's feet onto the real arena floor under its XZ (auto-adapts
+      // to the carved/uneven map); fall back to the constant if the ray misses.
+      const fy = floorYAt(s.home[0], s.home[2]);
+      if (fy != null) s.home[1] = fy;
       const center: Vec3 = [s.home[0], s.home[1] + CENTER_OFFSET, s.home[2]];
       game.upsert(makeEntity(s.id, "red", s.url, true), center, s.yaw);
     }

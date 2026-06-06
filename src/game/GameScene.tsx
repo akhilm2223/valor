@@ -1,24 +1,72 @@
 // ─────────────────────────────────────────────────────────────────────────
-// GameScene.tsx — the game shell. PHASE 0 mounts the physics world + arena
-// (with a Rapier fixed trimesh collider) + a placeholder character so the build
-// and asset pipeline are verifiable. PHASE 3 wires in PlayerController, Weapon,
-// Bots, VFX and the real HUD (marked with TODO(phaseN) below).
+// GameScene.tsx — the wired playable scene (PASS 1).
 //
-// `Game` is the full-screen entry (Canvas + DOM HUD overlay). The arena/lighting
-// mirror the studio's setup in src/App.tsx. Physics runs a FIXED timestep
-// (1/60) so movement and the 5-shots-to-kill cadence are frame-rate independent
-// and the smoke test is reproducible.
+// Mounts the full local FPS: Rapier physics world + arena (fixed trimesh
+// collider, registered with the hitscan BVH), the first-person PlayerController
+// camera, the Weapon (fire pipeline + viewmodel), patrolling shootable Bots,
+// pooled VFX, keyboard/mouse InputController, and the DOM HUD overlay.
+//
+// Physics runs a FIXED timestep (1/60) so movement and the 5-shots-to-kill
+// cadence are frame-rate independent. Click the canvas to lock the pointer and
+// play; WASD move, mouse look, click to fire, R to reload, Ctrl/C crouch.
+// The studio (character/gun/anim viewer) stays at the default route; `?game`
+// loads this.
 // ─────────────────────────────────────────────────────────────────────────
 
-import { Suspense } from "react";
-import { Canvas } from "@react-three/fiber";
-import { Environment, OrbitControls } from "@react-three/drei";
+import { Suspense, useEffect, useRef } from "react";
+import { Canvas, useFrame, useThree } from "@react-three/fiber";
+import { Environment } from "@react-three/drei";
 import { Physics, RigidBody } from "@react-three/rapier";
+import type { Group } from "three";
 import { Arena } from "../Models";
-import { Gun } from "../Gun";
-import { AnimatedCharacter } from "./AnimatedCharacter";
+import { PlayerController } from "./PlayerController";
+import { Weapon } from "./Weapon";
+import { Bots } from "./Bot";
+import { Vfx } from "./vfx";
+import { HUD } from "./HUD";
+import { InputController } from "./input";
+import { registerWorld, clearWorld, raycastShot } from "./hitscan";
+import { tickCombat, combat } from "./combat";
+import { useGame, transforms } from "./stores";
+import { LOCAL_ID } from "./contracts";
 
-// In-canvas scene contents. Children are added phase by phase.
+// Static world: trimesh collider around the carved arena, also registered with
+// the hitscan BVH for bullet-vs-world tests. Registration runs after the GLB has
+// mounted under our group (we're inside <Suspense>, so geometry is ready).
+function World() {
+  const ref = useRef<Group>(null);
+  useEffect(() => {
+    if (ref.current) registerWorld(ref.current);
+    return () => clearWorld();
+  }, []);
+  return (
+    <RigidBody type="fixed" colliders="trimesh">
+      <group ref={ref}>
+        <Arena />
+      </group>
+    </RigidBody>
+  );
+}
+
+// Drives time-based combat (respawns) once per frame, scene-wide.
+function CombatTicker() {
+  useFrame(() => tickCombat(Date.now()));
+  return null;
+}
+
+// Dev-only handle so an automated browser smoke test can exercise the REAL wired
+// modules (raycast against the live scene, apply damage) — stripped from prod.
+function DevHook() {
+  const gl = useThree((s) => s.gl);
+  const scene = useThree((s) => s.scene);
+  const camera = useThree((s) => s.camera);
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    (window as unknown as { __mosh?: unknown }).__mosh = { useGame, transforms, raycastShot, combat, LOCAL_ID, gl, scene, camera };
+  }, [gl, scene, camera]);
+  return null;
+}
+
 function Scene() {
   return (
     <>
@@ -38,19 +86,18 @@ function Scene() {
       <Environment preset="city" />
 
       <Physics timeStep={1 / 60}>
-        {/* Static world: trimesh collider around the carved arena mesh. */}
-        <RigidBody type="fixed" colliders="trimesh">
-          <Arena />
-        </RigidBody>
-
-        {/* Placeholder bot — exercises the fit + hold pipeline. Replaced by the
-            real <Bot/> spawner in Phase 2/3. */}
-        <AnimatedCharacter url="/models/character_a.glb" height={1.8} position={[0, 0, 0]} hold={<Gun length={0.22} variant="normal" />} animState="idle" />
+        <World />
+        {/* Spawn just above the measured plaza floor (feet ~-3.76) so the player
+            settles instantly instead of free-falling several metres. */}
+        <PlayerController spawn={[0, -2.5, 6]} />
+        <Weapon />
+        <Bots count={3} />
+        <Vfx />
+        <CombatTicker />
       </Physics>
 
-      {/* TODO(phase3): replace OrbitControls with PlayerController FPP camera +
-          InputController; mount <Weapon/>, <Bot/> spawner, <Vfx/>. */}
-      <OrbitControls makeDefault target={[0, 1, 0]} />
+      <InputController />
+      <DevHook />
     </>
   );
 }
@@ -58,28 +105,18 @@ function Scene() {
 export function Game() {
   return (
     <div style={{ position: "absolute", inset: 0 }}>
-      <Canvas shadows camera={{ position: [4, 2.5, 6], fov: 70, near: 0.05, far: 300 }} dpr={[1, 2]}>
+      <Canvas shadows camera={{ position: [0, 1.5, 6], fov: 75, near: 0.05, far: 300 }} dpr={[1, 2]} gl={{ preserveDrawingBuffer: import.meta.env.DEV }}>
         <Suspense fallback={null}>
           <Scene />
         </Suspense>
       </Canvas>
 
-      {/* DOM crosshair placeholder — replaced by <HUD/> in Phase 3. */}
-      <div
-        style={{
-          position: "absolute",
-          left: "50%",
-          top: "50%",
-          width: 6,
-          height: 6,
-          marginLeft: -3,
-          marginTop: -3,
-          borderRadius: "50%",
-          background: "rgba(255,255,255,0.85)",
-          pointerEvents: "none",
-        }}
-      />
-      <a href="?" style={{ position: "absolute", top: 12, left: 12, color: "#fff", font: "13px system-ui", textDecoration: "none", background: "rgba(20,24,28,0.7)", padding: "6px 10px", borderRadius: 8 }}>
+      <HUD />
+
+      <a
+        href="?"
+        style={{ position: "absolute", top: 12, left: 12, color: "#fff", font: "13px system-ui", textDecoration: "none", background: "rgba(20,24,28,0.7)", padding: "6px 10px", borderRadius: 8 }}
+      >
         ← Studio
       </a>
     </div>

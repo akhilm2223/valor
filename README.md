@@ -2,7 +2,8 @@
 
 Body-controlled multiplayer party game for the SpacetimeDB hackathon (NY Tech Week, Jun 5–7 2026).
 This folder is the **3D + engine starter**: the map, the 3 characters, and a working R3F scene
-that loads them. Multiplayer (SpacetimeDB) and pose input are NOT wired yet — see "What's next".
+that loads them, **plus a local playable FPS milestone** (see "Game" below). Multiplayer
+(SpacetimeDB) and pose input are NOT wired yet — see "What's next".
 
 ## Run it
 
@@ -12,9 +13,23 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:5174 — you'll see the Chicken Gun arena with 3 characters standing in it,
-orbit-controllable, with an FPS counter (top-left). `host: true` is set so phones/laptops on the
-same Wi-Fi can join via your machine's LAN IP (e.g. http://192.168.x.x:5174).
+Open http://localhost:5155 — the **model studio** (character/gun/animation viewer), orbit-controllable.
+`host: true` is set so phones/laptops on the same Wi-Fi can join via your machine's LAN IP.
+
+## Game (PASS 1 — local playable FPS)
+
+Open **http://localhost:5155/?game** for a single-player first-person shooter on the real arena:
+walk/strafe/crouch, a hitscan pistol, and bot targets that lose **20 HP/shot** and die on the
+**5th** (100 HP). Click to lock the pointer · WASD move · mouse look · click fire · R reload ·
+Ctrl/C crouch. Built to the gun logic in `Game-Logic-Deep-Dive.md` §1–§2; combat is local but
+behind interfaces so the SpacetimeDB pass (`Combat-Netcode-Plan.md`) is an additive swap.
+
+```bash
+npm test        # headless combat proof (5 shots → dead)
+npm run smoke    # headless browser smoke (boots ?game, raycasts a live bot, screenshots → /tmp/mosh-game.png)
+```
+
+Full architecture + file map: **`src/game/README.md`**.
 
 ## What's in here
 

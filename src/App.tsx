@@ -125,7 +125,7 @@ export function App() {
           <Environment preset="city" />
         </Suspense>
 
-        {/* Studio floor: contact shadow grounds the model, grid gives scale reference */}
+        {/* Studio floor: contact shadow grounds the model, grid gives scale reference. */}
         <ContactShadows position={[0, 0.001, 0]} opacity={0.5} scale={12} blur={2.2} far={6} />
         <Grid
           position={[0, 0, 0]}
@@ -189,7 +189,12 @@ export function App() {
           maxWidth: 230, // keep the animation-button row wrapping instead of widening the panel over the model
         }}
       >
-        <div style={{ fontWeight: 700, marginBottom: 10, letterSpacing: 0.3 }}>🎬 Model Studio</div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+          <span style={{ fontWeight: 700, letterSpacing: 0.3 }}>🎬 Model Studio</span>
+          <a href="#game" style={{ color: "#7db0ff", fontWeight: 600, fontSize: 12 }}>
+            🎮 Play arena →
+          </a>
+        </div>
 
         <div style={{ fontWeight: 600, marginBottom: 8, opacity: 0.9 }}>Camera</div>
         <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
@@ -199,6 +204,7 @@ export function App() {
             </button>
           ))}
         </div>
+
 
         <div style={{ fontWeight: 600, marginBottom: 8, opacity: 0.9 }}>Model</div>
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>

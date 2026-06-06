@@ -37,9 +37,11 @@ import { capsuleFor, useGame } from "./stores";
 // ── Patch three-mesh-bvh onto three's prototypes (once, at module load) ────
 // After this, `geometry.computeBoundsTree()` builds an accelerated BVH and any
 // Raycaster transparently uses it. Guarded so a hot-reload can't double-patch.
-BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
-BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
-Mesh.prototype.raycast = acceleratedRaycast;
+// (casts: three-mesh-bvh 0.9 returns GeometryBVH where three's augmented
+// prototype types declare MeshBVH — same runtime fn, just reconcile the types.)
+BufferGeometry.prototype.computeBoundsTree = computeBoundsTree as unknown as typeof BufferGeometry.prototype.computeBoundsTree;
+BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree as unknown as typeof BufferGeometry.prototype.disposeBoundsTree;
+Mesh.prototype.raycast = acceleratedRaycast as unknown as typeof Mesh.prototype.raycast;
 
 // ── World registry ─────────────────────────────────────────────────────────
 // The static meshes the shot ray tests against. Populated by GameScene once the

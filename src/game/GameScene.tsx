@@ -15,10 +15,11 @@
 
 import { Suspense, useEffect, useRef } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { Environment } from "@react-three/drei";
+import { Environment, Sky } from "@react-three/drei";
 import { Physics, RigidBody } from "@react-three/rapier";
 import type { Group } from "three";
 import { Arena } from "../Models";
+import { Scatter } from "../Scatter";
 import { PlayerController } from "./PlayerController";
 import { Weapon } from "./Weapon";
 import { Bots } from "./Bot";
@@ -44,6 +45,7 @@ function World() {
       <group ref={ref}>
         <Arena />
       </group>
+      <Scatter />
     </RigidBody>
   );
 }
@@ -80,8 +82,11 @@ function DevHook() {
 function Scene() {
   return (
     <>
-      <color attach="background" args={["#8fd3ff"]} />
-      <hemisphereLight args={["#ffffff", "#3a3a40", 1.0]} />
+      {/* Same look as the studio map: sky-blue bg + fog + sun */}
+      <color attach="background" args={["#bcd4e6"]} />
+      <fog attach="fog" args={["#bcd4e6", 60, 220]} />
+      <Sky sunPosition={[60, 18, 40]} turbidity={3} rayleigh={3} mieCoefficient={0.005} mieDirectionalG={0.7} />
+      <hemisphereLight args={["#bcd4e6", "#5a4633", 0.9]} />
       <directionalLight
         position={[12, 18, 8]}
         intensity={2.2}
@@ -104,7 +109,9 @@ function Scene() {
         <World />
         {/* Spawn just above the measured plaza floor (feet ~-3.76) so the player
             settles instantly instead of free-falling several metres. */}
-        <PlayerController spawn={[0, -2.5, 6]} />
+        {/* Spawn on the real plaza ground (~y -7, per the studio's dialed-in stand
+            point), capsule centre a bit above so it settles instead of falling. */}
+        <PlayerController spawn={[10, -6, -6]} />
         <Weapon />
         <Bots count={3} />
         <Vfx />

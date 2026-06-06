@@ -1,3 +1,4 @@
+import type * as React from "react";
 import { useGLTF } from "@react-three/drei";
 
 // The Chicken Gun map, carved to one plaza in Blender then optimized: 1.6 MB,
@@ -9,7 +10,7 @@ export function Arena() {
 }
 
 // One of the 3 characters. Swap the path for character_b.glb / clay.glb.
-export function Character({ url = "/models/character_a.glb", ...props }: { url?: string } & JSX.IntrinsicElements["group"]) {
+export function Character({ url = "/models/character_a.glb", ...props }: { url?: string } & React.ComponentProps<"group">) {
   const { scene } = useGLTF(url);
   return (
     <group {...props}>

@@ -83,7 +83,12 @@ function Scene() {
         shadow-camera-bottom={-30}
         shadow-bias={-0.0004}
       />
-      <Environment preset="city" />
+      {/* Isolated Suspense: the env map loads from a CDN, so if it's slow/blocked
+          it must NOT blank the whole playable scene (the lights below already
+          light it). */}
+      <Suspense fallback={null}>
+        <Environment preset="city" />
+      </Suspense>
 
       <Physics timeStep={1 / 60}>
         <World />

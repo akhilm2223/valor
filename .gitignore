@@ -3,3 +3,6 @@ dist
 *.local
 .DS_Store
 .playwright-mcp/
+
+# build artifacts
+tsconfig.tsbuildinfo

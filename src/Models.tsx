@@ -36,8 +36,11 @@ export function FitModel({
   url,
   height = 3,
   hold,
-  holdOffset = [0, 0.08, -0.02],
-  holdRotation = [(-172 * Math.PI) / 180, -Math.PI / 2, -Math.PI / 2],
+  // Defaults are the "while animating" hold preset — in-game a clip is always
+  // playing, so the gun sits in the grip for the animated hand pose. (The studio
+  // swaps to a separate bind-pose preset when no clip is selected.)
+  holdOffset = [0.04, 0.24, -0.02],
+  holdRotation = [(-277 * Math.PI) / 180, (15 * Math.PI) / 180, (-75 * Math.PI) / 180],
   holdScale = 1.2,
   gripCurl = 1,
   animation,

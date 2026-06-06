@@ -1,4 +1,4 @@
-import { Suspense, useState } from "react";
+import { Suspense, useState, useEffect } from "react";
 import { Canvas } from "@react-three/fiber";
 import { OrbitControls, Environment, Stats, Grid, ContactShadows, PerspectiveCamera } from "@react-three/drei";
 import { FitModel } from "./Models";
@@ -34,12 +34,20 @@ const ANIMATIONS = [
   { label: "Dying", url: "/animations/dying.glb" },
 ];
 
-// Gun-in-hand transform, dialed in via the studio's Fix Gun panel then baked here.
-// Offset in metres, rotation in radians (panel showed -172°/-90°/-90°), scale is a
-// multiplier on the auto hand-scale (1.2 = "a little bigger"), curl wraps fingers.
-const GUN_HOLD = {
+// Gun-in-hand transforms, dialed in via the studio's Fix Gun panel then baked here.
+// Offset in metres, rotation in radians, scale multiplies the auto hand-scale,
+// curl wraps the fingers. There are TWO presets because the animations rotate the
+// hand bone away from its bind orientation, so the gun needs a different offset to
+// sit in the grip while a clip plays vs. the static bind pose.
+const GUN_HOLD_STATIC = {
   offset: [0, 0.08, -0.02] as [number, number, number],
   rotation: [(-172 * Math.PI) / 180, -Math.PI / 2, -Math.PI / 2] as [number, number, number],
+  scale: 1.2,
+  curl: 1,
+};
+const GUN_HOLD_ANIM = {
+  offset: [0.04, 0.24, -0.02] as [number, number, number],
+  rotation: [(-277 * Math.PI) / 180, (15 * Math.PI) / 180, (-75 * Math.PI) / 180] as [number, number, number],
   scale: 1.2,
   curl: 1,
 };
@@ -54,10 +62,22 @@ export function App() {
 
   // Gun-in-hand transform (the "fix the gun" controls). Tuned live in the panel,
   // then the numbers were read off and baked into GUN_HOLD as the defaults.
-  const [gOff, setGOff] = useState<[number, number, number]>(GUN_HOLD.offset);
-  const [gRot, setGRot] = useState<[number, number, number]>(GUN_HOLD.rotation);
-  const [gScale, setGScale] = useState(GUN_HOLD.scale);
-  const [curl, setCurl] = useState(GUN_HOLD.curl); // finger curl around the grip, 0..1
+  const [gOff, setGOff] = useState<[number, number, number]>(GUN_HOLD_STATIC.offset);
+  const [gRot, setGRot] = useState<[number, number, number]>(GUN_HOLD_STATIC.rotation);
+  const [gScale, setGScale] = useState(GUN_HOLD_STATIC.scale);
+  const [curl, setCurl] = useState(GUN_HOLD_STATIC.curl); // finger curl around the grip, 0..1
+
+  // Swap the gun-hold preset when a clip starts/stops: bind pose and animation
+  // need different offsets for the gun to sit in the grip (the clip rotates the
+  // hand bone). Re-applies the preset on every toggle, so manual nudges reset.
+  const animating = anim !== "";
+  useEffect(() => {
+    const h = animating ? GUN_HOLD_ANIM : GUN_HOLD_STATIC;
+    setGOff(h.offset);
+    setGRot(h.rotation);
+    setGScale(h.scale);
+    setCurl(h.curl);
+  }, [animating]);
   const POS_STEP = 0.02; // metres per nudge
   const ROT_STEP = Math.PI / 24; // 7.5° per nudge
   const bump = (set: typeof setGOff, i: number, d: number) =>
@@ -243,10 +263,11 @@ export function App() {
             <button
               style={{ ...tab(false), width: "100%", marginTop: 10 }}
               onClick={() => {
-                setGOff(GUN_HOLD.offset);
-                setGRot(GUN_HOLD.rotation);
-                setGScale(GUN_HOLD.scale);
-                setCurl(GUN_HOLD.curl);
+                const h = animating ? GUN_HOLD_ANIM : GUN_HOLD_STATIC;
+                setGOff(h.offset);
+                setGRot(h.rotation);
+                setGScale(h.scale);
+                setCurl(h.curl);
               }}
             >
               Reset gun

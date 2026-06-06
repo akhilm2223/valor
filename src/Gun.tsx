@@ -1,179 +1,262 @@
 import { useMemo } from "react";
-import { RoundedBox } from "@react-three/drei";
+import { Shape, ExtrudeGeometry } from "three";
 
-// Three procedural guns built from primitives — no model files. All share one
-// orientation: barrel-forward along -Z, grip down -Y, so when parented to a hand
-// bone (or an FPP camera) the muzzle points where you look. `length` scales the
-// whole gun in world units (the slide is ~`length` long).
+// Three procedural guns built in code — no model files. The big quality jump over
+// stacked boxes (per the Three.js research): the slide and frame are EXTRUDED 2D
+// PROFILES (THREE.Shape -> ExtrudeGeometry with small bevels) so the silhouette is
+// a real gun outline whose every edge catches a highlight; the barrel is a turned
+// cylinder; serrations + sights + trigger + guard + mag are small accent parts; and
+// the look comes from 3-tone material contrast (metal slide / matte frame / dark
+// machined accents), all lit by the studio's <Environment> envMap.
 //
-// Material choices come straight from the Three.js PBR research:
-//   • Metals (metalness>0) get ALL their colour from reflections, so the studio's
-//     <Environment preset="city"> is what makes gold/steel look like metal at all
-//     — without an envMap a metal renders near-black.
-//   • Gold: metalness 1, low roughness (~0.18) + clearcoat for a lacquered sheen.
-//   • Gunmetal vs polymer: the metalness CONTRAST (0.9 slide vs 0 grip) separates
-//     the parts more than colour does.
-//   • Blaster glow without postprocessing: high emissiveIntensity + toneMapped
-//     OFF, so the renderer's tonemapper doesn't crush the neon toward white.
-//   • RoundedBox over boxGeometry everywhere: a small bevel catches an edge
-//     highlight on every part, which is what reads as "manufactured", not "cube".
+// Local frame (kept identical to the old gun so the hand-hold transform still fits):
+// profile is authored X = length (muzzle at +X), Y = height, Z = width; the whole
+// thing is then rotated +90° about Y so the barrel points -Z and the grip -Y, and
+// scaled by `length`. Centered on the grip so it seats in the palm.
 
 export type GunVariant = "normal" | "golden" | "blaster";
 
 type MatSpec = { physical?: boolean; props: Record<string, unknown> };
 
-const PALETTES: Record<Exclude<GunVariant, "blaster">, { body: MatSpec; grip: MatSpec }> = {
-  // Tactical: satin steel slide + matte polymer grip.
+const PALETTES: Record<GunVariant, { slide: MatSpec; frame: MatSpec; accent: MatSpec }> = {
+  // Tactical: satin steel slide, matte polymer frame, near-black machined controls.
   normal: {
-    body: { props: { color: "#2b2e33", metalness: 0.9, roughness: 0.45, envMapIntensity: 1 } },
-    grip: { props: { color: "#17181b", metalness: 0, roughness: 0.82 } },
+    slide: { props: { color: "#2a2d33", metalness: 0.92, roughness: 0.34, envMapIntensity: 1.1 } },
+    frame: { props: { color: "#191a1d", metalness: 0.0, roughness: 0.86 } },
+    accent: { props: { color: "#0b0c0e", metalness: 0.7, roughness: 0.3 } },
   },
-  // Golden gun (Scaramanga-style): polished gold body, darker brushed-gold grip.
+  // Golden gun: polished gold slide (clearcoat sheen), brushed-gold frame, gold trim.
   golden: {
-    body: {
+    slide: {
       physical: true,
-      props: { color: "#ffd27a", metalness: 1, roughness: 0.18, envMapIntensity: 1.3, clearcoat: 1, clearcoatRoughness: 0.12 },
+      props: { color: "#ffd277", metalness: 1, roughness: 0.16, envMapIntensity: 1.35, clearcoat: 1, clearcoatRoughness: 0.1 },
     },
-    grip: { props: { color: "#7a591a", metalness: 1, roughness: 0.5, envMapIntensity: 1.1 } },
+    frame: { props: { color: "#a9791f", metalness: 1, roughness: 0.5, envMapIntensity: 1.1 } },
+    accent: { props: { color: "#5c4310", metalness: 1, roughness: 0.35, envMapIntensity: 1 } },
+  },
+  // (blaster handled by its own component — these values are unused for it)
+  blaster: {
+    slide: { props: { color: "#15181c", metalness: 0.7, roughness: 0.4 } },
+    frame: { props: { color: "#0e1013", metalness: 0.3, roughness: 0.82 } },
+    accent: { props: { color: "#02151b", emissive: "#22e0ff", emissiveIntensity: 3, toneMapped: false } },
   },
 };
 
-// Render the right material element for a spec (physical adds clearcoat).
 function Mat({ m }: { m: MatSpec }) {
   return m.physical ? <meshPhysicalMaterial {...m.props} /> : <meshStandardMaterial {...m.props} />;
 }
 
+// --- 2D profiles (authored in L=1 units, muzzle toward +X) -------------------
+
+// Slide: long top block, chamfered front-top + rear corners (bevel rounds the rest).
+function slideShape(): Shape {
+  const s = new Shape();
+  s.moveTo(0.06, 0.46);
+  s.lineTo(1.0, 0.46); // bottom, out to muzzle
+  s.lineTo(1.0, 0.575); // front face
+  s.lineTo(0.965, 0.62); // front-top chamfer
+  s.lineTo(0.2, 0.62); // flat slide top
+  s.lineTo(0.14, 0.605); // rear-top chamfer
+  s.lineTo(0.06, 0.55);
+  s.lineTo(0.06, 0.46);
+  return s;
+}
+
+// Frame + grip: dust cover under the barrel, raked grip, beavertail tang. The
+// trigger guard is a separate ring (simpler + safer than a Shape hole). Frame top
+// runs to 0.48 so it tucks UNDER the slide (0.46) — overlap, never coplanar.
+function frameShape(): Shape {
+  const s = new Shape();
+  s.moveTo(1.0, 0.48); // front-top, under slide
+  s.lineTo(1.0, 0.34); // muzzle underside (dust cover front)
+  s.lineTo(0.52, 0.34); // dust cover bottom
+  s.lineTo(0.49, 0.2); // step down toward trigger
+  s.quadraticCurveTo(0.47, 0.08, 0.43, 0.02); // front grip strap
+  s.lineTo(0.4, 0.0); // grip toe
+  s.lineTo(0.13, 0.0); // grip base (mag well)
+  s.quadraticCurveTo(0.07, 0.04, 0.085, 0.14); // heel
+  s.lineTo(0.12, 0.31); // raked backstrap
+  s.quadraticCurveTo(0.14, 0.42, 0.23, 0.48); // beavertail up to slide
+  s.lineTo(1.0, 0.48); // frame top forward, close
+  return s;
+}
+
+const EXTRUDE = { bevelEnabled: true, bevelThickness: 0.006, bevelSize: 0.005, bevelSegments: 2, curveSegments: 24, steps: 1 };
+
+// Dispatcher — no hooks here, so swapping variants never changes hook order.
 export function Gun({
   length = 0.22,
   variant = "normal",
   ...props
 }: { length?: number; variant?: GunVariant } & React.ComponentProps<"group">) {
-  // Derive every part from `length` so proportions hold at any scale.
-  const d = useMemo(() => {
-    const L = length;
-    return {
-      L,
-      slideLen: L,
-      slideH: L * 0.28,
-      slideW: L * 0.22,
-      barrelLen: L * 0.45,
-      gripLen: L * 0.75,
-      gripW: L * 0.2,
-      gripThick: L * 0.26,
-      triggerGuard: L * 0.18,
-      r: L * 0.018, // bevel radius shared by RoundedBox parts
-    };
-  }, [length]);
+  if (variant === "blaster") return <Blaster length={length} {...props} />;
+  return <Pistol length={length} variant={variant} {...props} />;
+}
 
-  if (variant === "blaster") return <Blaster d={d} {...props} />;
-
+function Pistol({
+  length = 0.22,
+  variant,
+  ...props
+}: { length?: number; variant: Exclude<GunVariant, "blaster"> } & React.ComponentProps<"group">) {
   const pal = PALETTES[variant];
+
+  const slideW = 0.125;
+  const frameW = 0.135;
+  const { slideGeo, frameGeo } = useMemo(() => {
+    const slideGeo = new ExtrudeGeometry(slideShape(), { ...EXTRUDE, depth: slideW });
+    slideGeo.translate(0, 0, -slideW / 2);
+    const frameGeo = new ExtrudeGeometry(frameShape(), { ...EXTRUDE, depth: frameW });
+    frameGeo.translate(0, 0, -frameW / 2);
+    return { slideGeo, frameGeo };
+  }, []);
+
+  // Rear-slide cocking serrations: a raked row of thin grooves.
+  const serrations = Array.from({ length: 6 }, (_, i) => 0.17 + i * 0.025);
+
   return (
     <group {...props}>
-      {/* Slide / upper receiver — the long top block, barrel pointing -Z */}
-      <RoundedBox args={[d.slideW, d.slideH, d.slideLen]} radius={d.r} smoothness={4} creaseAngle={0.4} position={[0, 0, -d.slideLen * 0.1]} castShadow>
-        <Mat m={pal.body} />
-      </RoundedBox>
+      {/* orient profile (muzzle +X) to barrel -Z / grip -Y, then scale + center on grip */}
+      <group rotation={[0, Math.PI / 2, 0]} scale={length}>
+        <group position={[-0.52, -0.26, 0]}>
+          {/* Slide (metal) */}
+          <mesh geometry={slideGeo} castShadow>
+            <Mat m={pal.slide} />
+          </mesh>
+          {/* Frame + grip (matte/polymer) */}
+          <mesh geometry={frameGeo} castShadow>
+            <Mat m={pal.frame} />
+          </mesh>
 
-      {/* Ejection-port notch: a slightly darker inset box, offset out to avoid z-fight */}
-      <RoundedBox args={[d.slideW * 1.02, d.slideH * 0.34, d.slideLen * 0.3]} radius={d.r * 0.6} smoothness={3} position={[0, d.slideH * 0.18, -d.slideLen * 0.05]} castShadow>
-        <meshStandardMaterial color="#0c0d0f" metalness={0.6} roughness={0.6} />
-      </RoundedBox>
+          {/* Barrel: turned cylinder poking past the muzzle, with a recessed crown */}
+          <mesh position={[1.06, 0.52, 0]} rotation={[0, 0, Math.PI / 2]} castShadow>
+            <cylinderGeometry args={[0.052, 0.052, 0.14, 20]} />
+            <Mat m={pal.accent} />
+          </mesh>
+          <mesh position={[1.13, 0.52, 0]} rotation={[0, 0, Math.PI / 2]}>
+            <cylinderGeometry args={[0.03, 0.03, 0.02, 16]} />
+            <meshStandardMaterial color="#050506" metalness={0.4} roughness={0.7} />
+          </mesh>
 
-      {/* Barrel muzzle poking out the front */}
-      <mesh position={[0, d.slideH * 0.05, -d.slideLen * 0.6 - d.barrelLen / 2]} rotation={[Math.PI / 2, 0, 0]} castShadow>
-        <cylinderGeometry args={[d.slideW * 0.32, d.slideW * 0.32, d.barrelLen, 16]} />
-        <Mat m={pal.body} />
-      </mesh>
+          {/* Trigger guard ring + trigger */}
+          <mesh position={[0.46, 0.16, 0]} castShadow>
+            <torusGeometry args={[0.085, 0.018, 10, 24]} />
+            <Mat m={pal.frame} />
+          </mesh>
+          <mesh position={[0.46, 0.18, 0]} rotation={[0, 0, 0.3]} castShadow>
+            <boxGeometry args={[0.02, 0.08, 0.03]} />
+            <Mat m={pal.accent} />
+          </mesh>
 
-      {/* Front + rear sights */}
-      <RoundedBox args={[d.slideW * 0.18, d.slideH * 0.4, d.slideW * 0.2]} radius={d.r * 0.4} smoothness={2} position={[0, d.slideH * 0.6, -d.slideLen * 0.5]} castShadow>
-        <Mat m={pal.body} />
-      </RoundedBox>
-      <RoundedBox args={[d.slideW * 0.5, d.slideH * 0.35, d.slideW * 0.2]} radius={d.r * 0.4} smoothness={2} position={[0, d.slideH * 0.6, d.slideLen * 0.42]} castShadow>
-        <Mat m={pal.body} />
-      </RoundedBox>
+          {/* Cocking serrations (recessed dark grooves) */}
+          {serrations.map((x) => (
+            <mesh key={x} position={[x, 0.55, 0]} rotation={[0, 0, 0.32]}>
+              <boxGeometry args={[0.012, 0.15, slideW + 0.004]} />
+              <Mat m={pal.accent} />
+            </mesh>
+          ))}
 
-      {/* Grip — angled back and down, the part the hand wraps */}
-      <RoundedBox args={[d.gripW, d.gripLen, d.gripThick]} radius={d.r} smoothness={4} creaseAngle={0.4} position={[0, -d.gripLen * 0.45, d.slideLen * 0.28]} rotation={[0.32, 0, 0]} castShadow>
-        <Mat m={pal.grip} />
-      </RoundedBox>
+          {/* Front + rear sights */}
+          <mesh position={[0.95, 0.65, 0]} castShadow>
+            <boxGeometry args={[0.03, 0.05, 0.03]} />
+            <Mat m={pal.accent} />
+          </mesh>
+          <mesh position={[0.12, 0.66, 0]} castShadow>
+            <boxGeometry args={[0.05, 0.05, 0.08]} />
+            <Mat m={pal.accent} />
+          </mesh>
 
-      {/* Trigger guard ring + trigger */}
-      <mesh position={[0, -d.slideH * 0.9, d.slideLen * 0.05]} rotation={[Math.PI / 2, 0, 0]} castShadow>
-        <torusGeometry args={[d.triggerGuard, d.slideW * 0.08, 10, 20]} />
-        <Mat m={pal.body} />
-      </mesh>
-      <mesh position={[0, -d.slideH * 0.9, d.slideLen * 0.05]} castShadow>
-        <boxGeometry args={[d.slideW * 0.12, d.triggerGuard * 0.9, d.slideW * 0.1]} />
-        <Mat m={pal.body} />
-      </mesh>
+          {/* Magazine baseplate poking below the grip */}
+          <mesh position={[0.25, -0.02, 0]} castShadow>
+            <boxGeometry args={[0.3, 0.05, frameW + 0.01]} />
+            <Mat m={pal.accent} />
+          </mesh>
+        </group>
+      </group>
     </group>
   );
 }
 
-// Sci-fi energy blaster: a chunkier dark-metal body with cyan energy accents that
-// glow via emissive + toneMapped=false (no postprocessing needed), a translucent
-// plasma core down the barrel, and an emitter ring at the muzzle.
-function Blaster({ d, ...props }: { d: ReturnType<typeof gunDims> } & React.ComponentProps<"group">) {
-  const shell = { color: "#15181c", metalness: 0.65, roughness: 0.42, envMapIntensity: 1.1 };
-  const grip = { color: "#0e1013", metalness: 0.2, roughness: 0.85 };
-  // The neon trick: bright emissive, untonemapped so it stays saturated and "hot".
-  const energy = { color: "#02151b", emissive: "#21e6ff", emissiveIntensity: 2.8, toneMapped: false, metalness: 0.2, roughness: 0.4 };
+// --- Sci-fi energy blaster ---------------------------------------------------
+
+// Angular body (hard chamfers, bevelSegments 1) with a glowing core down the
+// barrel, vents, and a flared emitter. Neon reads without postprocessing via high
+// emissiveIntensity + toneMapped=false.
+function blasterBody(): Shape {
+  const s = new Shape();
+  s.moveTo(0.02, 0.3);
+  s.lineTo(0.86, 0.3); // bottom
+  s.lineTo(1.0, 0.4); // angled muzzle underside
+  s.lineTo(1.0, 0.62);
+  s.lineTo(0.74, 0.72); // raked top deck
+  s.lineTo(0.2, 0.72);
+  s.lineTo(0.06, 0.6);
+  s.lineTo(0.02, 0.3);
+  return s;
+}
+
+function Blaster({ length = 0.22, ...props }: { length?: number } & React.ComponentProps<"group">) {
+  const shell = { color: "#14171b", metalness: 0.7, roughness: 0.4, envMapIntensity: 1.1, flatShading: true };
+  const grip = { color: "#0d0f12", metalness: 0.25, roughness: 0.85 };
+  const energy = { color: "#02151b", emissive: "#22e6ff", emissiveIntensity: 3, toneMapped: false, roughness: 0.4 };
+
+  const W = 0.14;
+  const bodyGeo = useMemo(() => {
+    const g = new ExtrudeGeometry(blasterBody(), { depth: W, bevelEnabled: true, bevelThickness: 0.01, bevelSize: 0.008, bevelSegments: 1, steps: 1, curveSegments: 4 });
+    g.translate(0, 0, -W / 2);
+    return g;
+  }, []);
+  const vents = [0.3, 0.36, 0.42];
 
   return (
     <group {...props}>
-      {/* Main body — bigger, more angular than the pistol slide */}
-      <RoundedBox args={[d.slideW * 1.25, d.slideH * 1.15, d.slideLen * 1.05]} radius={d.r * 1.3} smoothness={4} creaseAngle={0.4} position={[0, 0, -d.slideLen * 0.08]} castShadow>
-        <meshStandardMaterial {...shell} />
-      </RoundedBox>
+      <group rotation={[0, Math.PI / 2, 0]} scale={length}>
+        <group position={[-0.5, -0.34, 0]}>
+          {/* Main body */}
+          <mesh geometry={bodyGeo} castShadow>
+            <meshStandardMaterial {...shell} />
+          </mesh>
 
-      {/* Energy cell mounted on top */}
-      <RoundedBox args={[d.slideW * 0.7, d.slideH * 0.55, d.slideLen * 0.45]} radius={d.r} smoothness={3} position={[0, d.slideH * 0.78, d.slideLen * 0.12]} castShadow>
-        <meshStandardMaterial {...energy} />
-      </RoundedBox>
+          {/* Glowing core down the centerline, seen between the body and barrel */}
+          <mesh position={[0.62, 0.51, 0]} rotation={[0, 0, Math.PI / 2]}>
+            <cylinderGeometry args={[0.05, 0.05, 0.5, 18]} />
+            <meshStandardMaterial {...energy} />
+          </mesh>
 
-      {/* Glowing accent strips along each side (offset out to avoid z-fighting) */}
-      {[-1, 1].map((s) => (
-        <RoundedBox key={s} args={[d.slideW * 0.06, d.slideH * 0.5, d.slideLen * 0.8]} radius={d.r * 0.3} smoothness={2} position={[s * d.slideW * 0.66, 0, -d.slideLen * 0.05]}>
-          <meshStandardMaterial {...energy} />
-        </RoundedBox>
-      ))}
+          {/* Barrel shroud + flared emitter ring at the muzzle */}
+          <mesh position={[1.02, 0.51, 0]} rotation={[0, 0, Math.PI / 2]} castShadow>
+            <cylinderGeometry args={[0.075, 0.085, 0.22, 8]} />
+            <meshStandardMaterial {...shell} />
+          </mesh>
+          <mesh position={[1.16, 0.51, 0]} rotation={[Math.PI / 2, 0, 0]}>
+            <torusGeometry args={[0.07, 0.022, 8, 20]} />
+            <meshStandardMaterial {...energy} />
+          </mesh>
 
-      {/* Barrel housing + translucent plasma core glowing down the bore */}
-      <mesh position={[0, -d.slideH * 0.05, -d.slideLen * 0.6 - d.barrelLen / 2]} rotation={[Math.PI / 2, 0, 0]} castShadow>
-        <cylinderGeometry args={[d.slideW * 0.42, d.slideW * 0.46, d.barrelLen, 18]} />
-        <meshStandardMaterial {...shell} />
-      </mesh>
-      <mesh position={[0, -d.slideH * 0.05, -d.slideLen * 0.6 - d.barrelLen / 2]} rotation={[Math.PI / 2, 0, 0]}>
-        <cylinderGeometry args={[d.slideW * 0.2, d.slideW * 0.2, d.barrelLen * 1.04, 16]} />
-        <meshStandardMaterial {...energy} />
-      </mesh>
+          {/* Top energy cell */}
+          <mesh position={[0.5, 0.78, 0]} castShadow>
+            <boxGeometry args={[0.34, 0.1, W * 0.7]} />
+            <meshStandardMaterial {...energy} />
+          </mesh>
 
-      {/* Muzzle emitter ring */}
-      <mesh position={[0, -d.slideH * 0.05, -d.slideLen * 0.6 - d.barrelLen]} rotation={[Math.PI / 2, 0, 0]}>
-        <torusGeometry args={[d.slideW * 0.4, d.slideW * 0.12, 12, 24]} />
-        <meshStandardMaterial {...energy} />
-      </mesh>
+          {/* Vents along the body */}
+          {vents.map((x) => (
+            <mesh key={x} position={[x, 0.5, 0]}>
+              <boxGeometry args={[0.02, 0.28, W + 0.01]} />
+              <meshStandardMaterial color="#02151b" emissive="#22e6ff" emissiveIntensity={2.2} toneMapped={false} />
+            </mesh>
+          ))}
 
-      {/* Grip */}
-      <RoundedBox args={[d.gripW * 1.1, d.gripLen, d.gripThick * 1.05]} radius={d.r} smoothness={4} creaseAngle={0.4} position={[0, -d.gripLen * 0.45, d.slideLen * 0.3]} rotation={[0.3, 0, 0]} castShadow>
-        <meshStandardMaterial {...grip} />
-      </RoundedBox>
-
-      {/* Trigger guard + trigger */}
-      <mesh position={[0, -d.slideH * 0.95, d.slideLen * 0.06]} rotation={[Math.PI / 2, 0, 0]} castShadow>
-        <torusGeometry args={[d.triggerGuard, d.slideW * 0.09, 10, 20]} />
-        <meshStandardMaterial {...shell} />
-      </mesh>
+          {/* Grip + trigger guard */}
+          <mesh position={[0.34, 0.08, 0]} rotation={[0, 0, 0.26]} castShadow>
+            <boxGeometry args={[0.16, 0.42, W * 0.85]} />
+            <meshStandardMaterial {...grip} />
+          </mesh>
+          <mesh position={[0.5, 0.18, 0]} castShadow>
+            <torusGeometry args={[0.085, 0.02, 10, 24]} />
+            <meshStandardMaterial {...shell} />
+          </mesh>
+        </group>
+      </group>
     </group>
   );
-}
-
-// Type helper so <Blaster> can share the dims object shape.
-function gunDims() {
-  return {
-    L: 0, slideLen: 0, slideH: 0, slideW: 0, barrelLen: 0,
-    gripLen: 0, gripW: 0, gripThick: 0, triggerGuard: 0, r: 0,
-  };
 }

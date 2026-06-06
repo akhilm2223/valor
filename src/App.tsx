@@ -11,7 +11,9 @@ export function App() {
       camera={{ position: [16, 11, 16], fov: 50, near: 0.1, far: 2000 }}
       dpr={[1, 2]}
     >
-      {/* Distance fog hides the endless flat ground plane fading into a blown-out horizon */}
+      {/* Solid sky-blue background so the edges never show white canvas */}
+      <color attach="background" args={["#bcd4e6"]} />
+      {/* Distance fog blends the ground into that same blue at the horizon */}
       <fog attach="fog" args={["#bcd4e6", 45, 120]} />
 
       {/* Daytime blue sky + sun. Lower sun + higher rayleigh = blue, not white-washed */}

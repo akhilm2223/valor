@@ -30,6 +30,7 @@ import { registerWorld, clearWorld, raycastShot } from "./hitscan";
 import { tickCombat, combat } from "./combat";
 import { useGame, transforms } from "./stores";
 import { LOCAL_ID } from "./contracts";
+import { VisionController } from "./VisionController";
 
 // Static world: trimesh collider around the carved arena, also registered with
 // the hitscan BVH for bullet-vs-world tests. Registration runs after the GLB has
@@ -135,6 +136,7 @@ export function Game() {
       </Canvas>
 
       <HUD />
+      <VisionController />
 
       <a
         href="?"

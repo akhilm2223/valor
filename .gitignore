@@ -3,6 +3,11 @@ dist
 *.local
 .DS_Store
 .playwright-mcp/
-
 # build artifacts
 tsconfig.tsbuildinfo
+
+# env + spacetimedb build output
+.env
+.env.*
+!.env.example
+server/target/

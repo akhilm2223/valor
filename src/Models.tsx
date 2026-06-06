@@ -2,7 +2,7 @@ import type * as React from "react";
 import { useMemo, useLayoutEffect } from "react";
 import { useGLTF } from "@react-three/drei";
 import { createPortal } from "@react-three/fiber";
-import { Box3, Vector3, Object3D } from "three";
+import { Box3, Vector3, Object3D, Quaternion } from "three";
 import { clone as cloneSkinned } from "three/examples/jsm/utils/SkeletonUtils.js";
 
 // The Chicken Gun map, carved to one plaza in Blender then optimized: 1.6 MB,
@@ -89,12 +89,12 @@ export function FitModel({
     // Find the right-hand bone to hang a held item on, plus the finger joints to
     // curl. These rigs are reduced Mixamo hands: only Thumb + Index bones exist.
     let hand: Object3D | null = null;
-    const fingerBones: { bone: Object3D; restX: number }[] = [];
+    const fingerBones: { bone: Object3D; restQ: Quaternion }[] = [];
     object.traverse((o) => {
       if (!hand && o.name === "mixamorigRightHand") hand = o;
       // Joints 1-3 are the bendable knuckles (4 is the fingertip end — skip it).
       if (/mixamorigRightHand(Thumb|Index)[123]$/.test(o.name)) {
-        fingerBones.push({ bone: o, restX: o.rotation.x });
+        fingerBones.push({ bone: o, restQ: o.quaternion.clone() });
       }
     });
     // The bone lives at the rig's native scale; the whole model is then scaled by
@@ -106,11 +106,15 @@ export function FitModel({
     return { object, scale, offset, hand, handScale, fingerBones };
   }, [scene, height]);
 
-  // Curl the finger joints around the grip. Bind pose = straight; we add a bend
-  // on each joint's local X (the knuckle's flexion axis for a Mixamo hand).
+  // Curl the finger joints around the grip. These finger bones extend down their
+  // own local +Y, so flexing toward the palm = rotating about local X. We restore
+  // the rest orientation then rotateX in the bone's OWN frame, so segments with
+  // flipped Euler frames still curl consistently into a fist (a plain rotation.x
+  // assignment didn't — the frames alternate sign and cancelled out).
   useLayoutEffect(() => {
-    for (const { bone, restX } of fingerBones) {
-      bone.rotation.x = restX + gripCurl * 1.1; // ~63° max curl per joint
+    for (const { bone, restQ } of fingerBones) {
+      bone.quaternion.copy(restQ);
+      bone.rotateX(gripCurl * 1.2); // ~69° max curl per joint
     }
   }, [fingerBones, gripCurl]);
 

@@ -17,11 +17,26 @@ const MODELS = [
   { label: "Clay", url: "/models/clay.glb" },
 ];
 
+// Slim Shooter Pack — Mixamo clips played on the rig (see ClipPlayer). Converted
+// from FBX to GLB via Blender. "" = static bind pose. Files in /public/animations.
+const ANIMATIONS = [
+  { label: "Bind pose", url: "" },
+  { label: "Aiming idle", url: "/animations/aiming_idle.glb" },
+  { label: "Firing", url: "/animations/firing.glb" },
+  { label: "Reloading", url: "/animations/reloading.glb" },
+  { label: "Walking", url: "/animations/walking.glb" },
+  { label: "Rifle run", url: "/animations/rifle_run.glb" },
+  { label: "Strafe L", url: "/animations/strafe_left.glb" },
+  { label: "Strafe R", url: "/animations/strafe_right.glb" },
+  { label: "Dying", url: "/animations/dying.glb" },
+];
+
 export function App() {
   const [url, setUrl] = useState(MODELS[0].url);
   const [height, setHeight] = useState(1.8); // ~human height in metres
   const [view, setView] = useState<View>("orbit");
   const [gun, setGun] = useState(true);
+  const [anim, setAnim] = useState(""); // "" = bind pose; else an /animations/*.fbx url
 
   // Gun-in-hand transform (the "fix the gun" controls). Tuned live, then the
   // numbers can be read off the panel and baked into the FitModel defaults.
@@ -69,6 +84,7 @@ export function App() {
               holdRotation={gRot}
               holdScale={gScale}
               gripCurl={curl}
+              animation={anim}
               castShadow
             />
           )}
@@ -139,7 +155,20 @@ export function App() {
           ))}
         </div>
 
-        <button onClick={() => setGun((g) => !g)} style={{ ...tab(gun), marginTop: 10, width: "100%" }}>
+        <div style={{ fontWeight: 600, margin: "14px 0 8px", opacity: 0.9 }}>Animation</div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {ANIMATIONS.map((a) => (
+            <button
+              key={a.url || "bind"}
+              onClick={() => setAnim(a.url)}
+              style={{ ...tab(anim === a.url), flex: "0 0 auto", padding: "6px 9px" }}
+            >
+              {a.label}
+            </button>
+          ))}
+        </div>
+
+        <button onClick={() => setGun((g) => !g)} style={{ ...tab(gun), marginTop: 12, width: "100%" }}>
           {gun ? "🔫 Gun: ON" : "Gun: OFF"}
         </button>
 

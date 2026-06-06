@@ -1,8 +1,8 @@
 import type * as React from "react";
-import { useMemo, useLayoutEffect } from "react";
+import { useMemo, useLayoutEffect, useEffect } from "react";
 import { useGLTF } from "@react-three/drei";
-import { createPortal } from "@react-three/fiber";
-import { Box3, Vector3, Object3D, Quaternion } from "three";
+import { createPortal, useFrame } from "@react-three/fiber";
+import { Box3, Vector3, Object3D, Quaternion, AnimationMixer, AnimationClip } from "three";
 import { clone as cloneSkinned } from "three/examples/jsm/utils/SkeletonUtils.js";
 
 // The Chicken Gun map, carved to one plaza in Blender then optimized: 1.6 MB,
@@ -40,10 +40,15 @@ export function FitModel({
   holdRotation = [0, -Math.PI / 2, -Math.PI / 2],
   holdScale = 1,
   gripCurl = 0,
+  animation,
   ...props
 }: {
   url: string;
   height?: number;
+  // Optional Mixamo .fbx clip to play on the rig. Both these GLBs and the FBX
+  // pack share the mixorig skeleton, so a clip retargets by bone name. Pass the
+  // url to a file under /animations; omit (or "") to show the static bind pose.
+  animation?: string;
   // Optional item to place in the character's right hand (e.g. <Gun/>). It's
   // portaled INTO the hand bone so it tracks the rig; authored at real-world
   // units, then un-scaled by the bone's own scale so size is character-agnostic.
@@ -123,6 +128,9 @@ export function FitModel({
       <group scale={scale} position={offset}>
         <primitive object={object} />
       </group>
+      {/* Play a Mixamo clip on the cloned rig. Keyed by url so switching clips
+          tears down the old mixer and rebuilds against the same object. */}
+      {animation && <ClipPlayer key={animation} target={object} url={animation} />}
       {/* Portal the held item into the hand bone so it follows the rig. The inner
           group orients a -Z-forward gun to sit in a Mixamo palm + sizes it. */}
       {hold && hand &&
@@ -138,6 +146,49 @@ export function FitModel({
         )}
     </group>
   );
+}
+
+// Drives a Mixamo clip onto an already-built rig (`target`). The clips ship as
+// GLBs (converted from the FBX pack via Blender — three's FBXLoader can't read
+// the FBX 2020 binaries). The clip and the character GLBs both use the mixamorig
+// skeleton, so a clip retargets purely by bone name — with two fixups: (1) the
+// clip's nodes keep the "mixamorig:Bone" colon while the character GLB strips it
+// to "mixamorigBone", so we normalize track names to match; (2) we drop every
+// position track. The clip is authored in centimetres while the rig is metres,
+// so an absolute hip-translation track would fling the model skyward — dropping
+// translation gives a clean in-place preview (bones keep their bind offsets and
+// only rotate), which is exactly what the studio wants.
+function ClipPlayer({ target, url }: { target: Object3D; url: string }) {
+  const { animations } = useGLTF(url);
+  const mixer = useMemo(() => new AnimationMixer(target), [target]);
+
+  useEffect(() => {
+    const src = animations[0];
+    if (!src) return;
+    // Bones the target rig actually has — these are reduced Mixamo hands (only
+    // Thumb + Index), so dropping tracks for the missing Middle/Ring/Pinky bones
+    // avoids a flood of harmless "No target node found" PropertyBinding warnings.
+    const bones = new Set<string>();
+    target.traverse((o) => bones.add(o.name));
+    const tracks = src.tracks
+      .filter((t) => !t.name.endsWith(".position"))
+      .map((t) => {
+        const c = t.clone();
+        c.name = c.name.replace(/:/g, ""); // mixamorig:Hips.quaternion -> mixamorigHips.quaternion
+        return c;
+      })
+      .filter((t) => bones.has(t.name.split(".")[0]));
+    const clip = new AnimationClip(url, src.duration, tracks);
+    const action = mixer.clipAction(clip);
+    action.reset().play();
+    return () => {
+      mixer.stopAllAction();
+      mixer.uncacheClip(clip);
+    };
+  }, [animations, mixer, url]);
+
+  useFrame((_, dt) => mixer.update(dt));
+  return null;
 }
 
 useGLTF.preload("/models/arena_opt.glb");

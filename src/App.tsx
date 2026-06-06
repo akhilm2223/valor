@@ -2,6 +2,7 @@ import { Suspense } from "react";
 import { Canvas } from "@react-three/fiber";
 import { OrbitControls, Environment, Stats, Sky } from "@react-three/drei";
 import { Arena } from "./Models";
+import { Scatter } from "./Scatter";
 
 export function App() {
   return (
@@ -30,6 +31,8 @@ export function App() {
 
       <Suspense fallback={null}>
         <Arena />
+        {/* Trees + rocks to fill the bare ground around the town */}
+        <Scatter />
         {/* Image-based lighting for material reflections, but no visible background */}
         <Environment preset="sunset" />
       </Suspense>

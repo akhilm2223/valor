@@ -28,6 +28,9 @@ const ANIMATIONS = [
   { label: "Rifle run", url: "/animations/rifle_run.glb" },
   { label: "Strafe L", url: "/animations/strafe_left.glb" },
   { label: "Strafe R", url: "/animations/strafe_right.glb" },
+  { label: "Crouch idle", url: "/animations/crouch_idle.glb" },
+  { label: "Grab pistol", url: "/animations/grabbing.glb" },
+  { label: "Punch", url: "/animations/punch.glb" },
   { label: "Dying", url: "/animations/dying.glb" },
 ];
 
@@ -133,6 +136,7 @@ export function App() {
           backdropFilter: "blur(6px)",
           userSelect: "none",
           minWidth: 190,
+          maxWidth: 230, // keep the animation-button row wrapping instead of widening the panel over the model
         }}
       >
         <div style={{ fontWeight: 700, marginBottom: 10, letterSpacing: 0.3 }}>🎬 Model Studio</div>

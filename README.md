@@ -44,28 +44,52 @@ same Wi-Fi can join via your machine's LAN IP (e.g. http://192.168.x.x:5174).
    prototype; a liability if the demo is recorded/posted or you win. Swap for a CC0 arena
    (Kenney.nl, Quaternius, poly.pizza) before anything public.
 
-2. **Performance:** the geometry is light (152K tris) but it's 1469 separate meshes with 50+
-   transparent double-sided materials → ~1500 draw calls. That stutters once ~20 networked
-   players are added. Optimize before relying on it.
+2. **Performance:** geometry is light (152K tris) but the export is ~727 meshes / 785 draw calls,
+   and 101 of 103 materials were BLEND + doubleSided. Transparency sorting + double-sided shading is
+   the real GPU cost; that stutters once ~20 networked players are added.
 
-### Optimizing the arena (gltf-transform is already installed globally)
+### What `arena_opt.glb` already is
 
-The geometry is already Draco-compressed + instanced; the 24 MB is ~100 uncompressed PNG
-textures. The single-command `optimize` only reaches ~10 MB. To get under 5 MB, compress
-textures to WebP, cap resolution at 512px, then re-apply Draco (this is what produced the
-3.5 MB `arena_opt.glb` the app loads):
+The committed `arena_opt.glb` (3.2 MB, loaded by the app) has had the full pass below applied to it.
+Measured before → after:
+
+| Metric | Original | arena_opt.glb |
+|---|---|---|
+| File size | 24 MB | **3.2 MB** |
+| Draw calls (~primitives) | 785 | **584** |
+| OPAQUE materials | 2 | **71** |
+| doubleSided | 103 | **30** |
+| BLEND (transparent) | 101 | **30** |
+
+Two separate problems, two separate fixes:
+- **Download size (24 MB):** all textures, ~100 uncompressed PNGs → WebP @ 512px + Draco. → 3.2 MB.
+- **Runtime framerate:** the merge + material audit below. This is what actually helps 20 players.
+
+### Re-running the optimization
+
+The runtime pass needs a script (CLI `optimize` won't do the per-material alpha audit). It:
+1. Decodes each material's baseColor alpha with `sharp`; flips BLEND→OPAQUE (and drops doubleSided)
+   where alpha is fully opaque (69 materials), keeps BLEND only for real translucency (glass/decals).
+2. `dedup` + `weld` + `join` to collapse meshes/draw calls. **No `flatten()`** — the map has rigged
+   props; flatten bakes node transforms into skinned meshes and produces hard glTF errors.
+
+Then the CLI handles textures + final Draco:
 
 ```bash
 cd mosh/public/models
-npx gltf-transform webp   arena_chickengun.glb a.glb --quality 80
+# 1. runtime pass (material audit + mesh join) -> arena_runtime.glb
+node optimize.mjs arena_chickengun.glb arena_runtime.glb
+# 2. textures + draco
+npx gltf-transform webp   arena_runtime.glb a.glb --quality 80
 npx gltf-transform resize a.glb b.glb --width 512 --height 512
 npx gltf-transform draco  b.glb arena_opt.glb
-rm a.glb b.glb
+rm a.glb b.glb arena_runtime.glb
+npx gltf-transform validate arena_opt.glb   # must say "No errors found"
 ```
 
-Result: 24 MB → 3.5 MB, no visible quality loss at demo distance. For sharper textures bump
-`--width/--height` to 1024 (lands ~6–8 MB). Or simpler: open in Blender, delete everything
-except one courtyard, re-export.
+**Bigger win, if you have Blender:** carve out one courtyard (delete the rest, Ctrl+J to join,
+export with Draco). The cheapest mesh is the one that isn't there — you only use ~5% of this town.
+Lands ~2 MB and a few hundred draw calls.
 
 ## What's next (not built yet — by design, shotgun-first)
 

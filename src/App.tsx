@@ -2,7 +2,7 @@ import { Suspense, useState } from "react";
 import { Canvas } from "@react-three/fiber";
 import { OrbitControls, Environment, Stats, Grid, ContactShadows, PerspectiveCamera } from "@react-three/drei";
 import { FitModel } from "./Models";
-import { Gun } from "./Gun";
+import { Gun, type GunVariant } from "./Gun";
 
 // 5155 is the TEST STUDIO — a clean stage for previewing characters, the gun, and
 // (next) Mixamo animations before they go into the real game. No arena map here:
@@ -34,19 +34,30 @@ const ANIMATIONS = [
   { label: "Dying", url: "/animations/dying.glb" },
 ];
 
+// Gun-in-hand transform, dialed in via the studio's Fix Gun panel then baked here.
+// Offset in metres, rotation in radians (panel showed -172°/-90°/-90°), scale is a
+// multiplier on the auto hand-scale (1.2 = "a little bigger"), curl wraps fingers.
+const GUN_HOLD = {
+  offset: [0, 0.08, -0.02] as [number, number, number],
+  rotation: [(-172 * Math.PI) / 180, -Math.PI / 2, -Math.PI / 2] as [number, number, number],
+  scale: 1.2,
+  curl: 1,
+};
+
 export function App() {
   const [url, setUrl] = useState(MODELS[0].url);
   const [height, setHeight] = useState(1.8); // ~human height in metres
   const [view, setView] = useState<View>("orbit");
   const [gun, setGun] = useState(true);
+  const [gunVariant, setGunVariant] = useState<GunVariant>("normal");
   const [anim, setAnim] = useState(""); // "" = bind pose; else an /animations/*.fbx url
 
-  // Gun-in-hand transform (the "fix the gun" controls). Tuned live, then the
-  // numbers can be read off the panel and baked into the FitModel defaults.
-  const [gOff, setGOff] = useState<[number, number, number]>([0, 0, 0]);
-  const [gRot, setGRot] = useState<[number, number, number]>([0, -Math.PI / 2, -Math.PI / 2]);
-  const [gScale, setGScale] = useState(1);
-  const [curl, setCurl] = useState(0); // finger curl around the grip, 0..1
+  // Gun-in-hand transform (the "fix the gun" controls). Tuned live in the panel,
+  // then the numbers were read off and baked into GUN_HOLD as the defaults.
+  const [gOff, setGOff] = useState<[number, number, number]>(GUN_HOLD.offset);
+  const [gRot, setGRot] = useState<[number, number, number]>(GUN_HOLD.rotation);
+  const [gScale, setGScale] = useState(GUN_HOLD.scale);
+  const [curl, setCurl] = useState(GUN_HOLD.curl); // finger curl around the grip, 0..1
   const POS_STEP = 0.02; // metres per nudge
   const ROT_STEP = Math.PI / 24; // 7.5° per nudge
   const bump = (set: typeof setGOff, i: number, d: number) =>
@@ -82,7 +93,7 @@ export function App() {
               url={url}
               height={height}
               position={[0, 0, 0]}
-              hold={gun ? <Gun length={0.22} /> : undefined}
+              hold={gun ? <Gun length={0.22} variant={gunVariant} /> : undefined}
               holdOffset={gOff}
               holdRotation={gRot}
               holdScale={gScale}
@@ -176,6 +187,22 @@ export function App() {
           {gun ? "🔫 Gun: ON" : "Gun: OFF"}
         </button>
 
+        {gun && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+            {(
+              [
+                ["normal", "Normal"],
+                ["golden", "Golden"],
+                ["blaster", "Blaster"],
+              ] as const
+            ).map(([v, label]) => (
+              <button key={v} onClick={() => setGunVariant(v)} style={{ ...tab(gunVariant === v), flex: "0 0 auto", padding: "6px 10px" }}>
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
+
         {/* Fix-the-gun controls: nudge the pistol's position/rotation/scale in the
             hand until it sits in the grip, then read the numbers off to bake in. */}
         {gun && (
@@ -216,10 +243,10 @@ export function App() {
             <button
               style={{ ...tab(false), width: "100%", marginTop: 10 }}
               onClick={() => {
-                setGOff([0, 0, 0]);
-                setGRot([0, -Math.PI / 2, -Math.PI / 2]);
-                setGScale(1);
-                setCurl(0);
+                setGOff(GUN_HOLD.offset);
+                setGRot(GUN_HOLD.rotation);
+                setGScale(GUN_HOLD.scale);
+                setCurl(GUN_HOLD.curl);
               }}
             >
               Reset gun

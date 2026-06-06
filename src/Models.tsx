@@ -36,10 +36,10 @@ export function FitModel({
   url,
   height = 3,
   hold,
-  holdOffset = [0, 0, 0],
-  holdRotation = [0, -Math.PI / 2, -Math.PI / 2],
-  holdScale = 1,
-  gripCurl = 0,
+  holdOffset = [0, 0.08, -0.02],
+  holdRotation = [(-172 * Math.PI) / 180, -Math.PI / 2, -Math.PI / 2],
+  holdScale = 1.2,
+  gripCurl = 1,
   animation,
   ...props
 }: {

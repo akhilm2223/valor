@@ -10,9 +10,12 @@ export function App() {
       camera={{ position: [16, 11, 16], fov: 50, near: 0.1, far: 2000 }}
       dpr={[1, 2]}
     >
-      {/* Daytime sky + sun so the town reads clearly instead of the washed-out city HDRI */}
-      <Sky sunPosition={[40, 30, 20]} turbidity={6} rayleigh={1.5} />
-      <hemisphereLight args={["#cfe8ff", "#5a4633", 0.7]} />
+      {/* Distance fog hides the endless flat ground plane fading into a blown-out horizon */}
+      <fog attach="fog" args={["#bcd4e6", 45, 120]} />
+
+      {/* Daytime blue sky + sun. Lower sun + higher rayleigh = blue, not white-washed */}
+      <Sky sunPosition={[60, 18, 40]} turbidity={3} rayleigh={3} mieCoefficient={0.005} mieDirectionalG={0.7} />
+      <hemisphereLight args={["#bcd4e6", "#5a4633", 0.9]} />
       <directionalLight
         position={[40, 50, 20]}
         intensity={2.2}

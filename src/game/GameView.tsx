@@ -1,12 +1,19 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls, Environment, Stats, Sky, useGLTF } from "@react-three/drei";
+import { EffectComposer, Bloom } from "@react-three/postprocessing";
 import { Group, Vector3, Mesh } from "three";
 import { FitModel } from "../Models";
 import { Scatter } from "../Scatter";
 import { Gun } from "../Gun";
 import { useKeys } from "./useKeys";
-import { Bullets, spawnBullet } from "./Bullets";
+import { Bullets, spawnBullet, spawnMuzzle } from "./Bullets";
+import { useWeapon } from "./weapon";
+
+// Weapon tuning (semi-auto pistol)
+const MAG = 12;
+const FIRE_INTERVAL = 0.14; // s — rate cap (~7/s); trigger is the real limiter
+const RELOAD_TIME = 0.9; // s — fire lockout
 
 // The actual game: drive a character around the arena_opt map and shoot. Separate
 // from the studio (5155 "/") — this is "/#game". Keyboard for now (WASD move, click
@@ -44,9 +51,17 @@ function Player() {
   const rig = useRef<Group>(null!); // moved + rotated each frame
   const [clip, setClip] = useState(CLIP.idle);
   const stateRef = useRef("idle");
-  const fireTimer = useRef(0);
+  const fireTimer = useRef(0); // firing-anim window
   const reloadTimer = useRef(0);
+  const cooldown = useRef(0);
+  const ammo = useRef(MAG);
   const wantFire = useRef(false);
+
+  const startReload = () => {
+    if (reloadTimer.current > 0 || ammo.current === MAG) return;
+    reloadTimer.current = RELOAD_TIME;
+    useWeapon.setState({ reloading: true });
+  };
 
   // scratch vectors
   const fwd = useMemo(() => new Vector3(), []);
@@ -87,16 +102,31 @@ function Player() {
     rig.current.position.y = SPAWN[1];
     rig.current.rotation.y = Math.atan2(fwd.x, fwd.z) + Math.PI; // character forward is -Z
 
-    // fire request -> spawn a bullet from the muzzle along the aim
+    // --- weapon: ammo / reload / fire-rate ---
     if (fireTimer.current > 0) fireTimer.current -= dt;
-    if (reloadTimer.current > 0) reloadTimer.current -= dt;
-    if (k["KeyR"] && reloadTimer.current <= 0) reloadTimer.current = 0.7;
+    if (cooldown.current > 0) cooldown.current -= dt;
+    if (reloadTimer.current > 0) {
+      reloadTimer.current -= dt;
+      if (reloadTimer.current <= 0) {
+        ammo.current = MAG;
+        useWeapon.setState({ ammo: MAG, reloading: false });
+      }
+    }
+    if (k["KeyR"]) startReload();
+
+    // muzzle world position (chest height, out the front)
+    muzzle.copy(rig.current.position).addScaledVector(up, 1.35).addScaledVector(fwd, 0.5);
+
     if (wantFire.current) {
       wantFire.current = false;
-      if (reloadTimer.current <= 0) {
-        muzzle.copy(rig.current.position).addScaledVector(up, 1.35).addScaledVector(fwd, 0.5);
+      if (reloadTimer.current <= 0 && cooldown.current <= 0 && ammo.current > 0) {
+        ammo.current -= 1;
+        useWeapon.setState({ ammo: ammo.current });
+        cooldown.current = FIRE_INTERVAL;
+        fireTimer.current = 0.3;
         spawnBullet(muzzle, fwd);
-        fireTimer.current = 0.35;
+        spawnMuzzle(muzzle);
+        if (ammo.current === 0) startReload(); // auto-reload on empty
       }
     }
 
@@ -164,7 +194,30 @@ function Scene() {
       </Suspense>
       <OrbitControls makeDefault minDistance={2} maxDistance={40} maxPolarAngle={Math.PI / 2.1} />
       <Stats />
+      {/* Bloom: only the >1 emissive parts (tracers, muzzle, sparks) glow */}
+      <EffectComposer>
+        <Bloom mipmapBlur intensity={0.9} luminanceThreshold={1} luminanceSmoothing={0.25} />
+      </EffectComposer>
     </>
+  );
+}
+
+function Hud() {
+  const { ammo, max, reloading } = useWeapon();
+  return (
+    <div
+      style={{
+        position: "absolute",
+        bottom: 18,
+        right: 22,
+        font: "700 26px/1 system-ui, sans-serif",
+        color: reloading ? "#ffb454" : "#fff",
+        textShadow: "0 2px 6px rgba(0,0,0,0.6)",
+        userSelect: "none",
+      }}
+    >
+      {reloading ? "RELOADING…" : `${ammo} / ${max}`}
+    </div>
   );
 }
 
@@ -191,6 +244,8 @@ export function GameView() {
           pointerEvents: "none",
         }}
       />
+
+      <Hud />
 
       {/* controls hint + back to studio */}
       <div

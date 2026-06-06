@@ -5,6 +5,6 @@ export default defineConfig({
   plugins: [react()],
   server: {
     host: true, // expose on LAN so phones/laptops in the room can join by IP
-    port: 5155,
+    port: 5174,
   },
 });

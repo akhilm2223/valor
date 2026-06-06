@@ -20,10 +20,16 @@ type Impact = { pos: Vector3; life: number };
 // Module singletons so the Player can spawn without React state churn.
 const bullets: Bullet[] = [];
 const impacts: Impact[] = [];
+const muzzles: Impact[] = []; // brief muzzle-flash sprites at the gun
 
 export function spawnBullet(origin: Vector3, dir: Vector3) {
   if (bullets.length >= MAX_BULLETS) bullets.shift();
   bullets.push({ pos: origin.clone(), vel: dir.clone().normalize().multiplyScalar(BULLET_SPEED), life: BULLET_LIFE });
+}
+
+export function spawnMuzzle(pos: Vector3) {
+  if (muzzles.length >= 8) muzzles.shift();
+  muzzles.push({ pos: pos.clone(), life: 0.05 });
 }
 
 // Renders + simulates all live bullets and impact sparks. `colliders` is the arena
@@ -31,6 +37,7 @@ export function spawnBullet(origin: Vector3, dir: Vector3) {
 export function Bullets({ colliders }: { colliders: React.RefObject<Object3D | null> }) {
   const bulletMesh = useRef<InstancedMesh>(null!);
   const impactMesh = useRef<InstancedMesh>(null!);
+  const muzzleMesh = useRef<InstancedMesh>(null!);
   const ray = useMemo(() => {
     const r = new Raycaster();
     (r as any).firstHitOnly = true;
@@ -101,6 +108,23 @@ export function Bullets({ colliders }: { colliders: React.RefObject<Object3D | n
       im.setMatrixAt(i, dummy.matrix);
     }
     im.instanceMatrix.needsUpdate = true;
+
+    // muzzle flashes: brief bright puff at the gun
+    for (let i = muzzles.length - 1; i >= 0; i--) {
+      muzzles[i].life -= dt;
+      if (muzzles[i].life <= 0) muzzles.splice(i, 1);
+    }
+    const mm = muzzleMesh.current;
+    for (let i = 0; i < 8; i++) {
+      dummy.quaternion.identity();
+      if (i < muzzles.length) {
+        dummy.position.copy(muzzles[i].pos);
+        dummy.scale.setScalar(0.18 + muzzles[i].life * 2);
+      } else dummy.scale.setScalar(0);
+      dummy.updateMatrix();
+      mm.setMatrixAt(i, dummy.matrix);
+    }
+    mm.instanceMatrix.needsUpdate = true;
   });
 
   return (
@@ -113,6 +137,10 @@ export function Bullets({ colliders }: { colliders: React.RefObject<Object3D | n
       <instancedMesh ref={impactMesh} args={[undefined, undefined, MAX_IMPACTS]} frustumCulled={false}>
         <sphereGeometry args={[1, 8, 8]} />
         <meshStandardMaterial color="#ffd27a" emissive="#ff8a1f" emissiveIntensity={4} toneMapped={false} transparent opacity={0.9} />
+      </instancedMesh>
+      <instancedMesh ref={muzzleMesh} args={[undefined, undefined, 8]} frustumCulled={false}>
+        <sphereGeometry args={[1, 6, 6]} />
+        <meshStandardMaterial color="#fff4c2" emissive="#ffcc44" emissiveIntensity={6} toneMapped={false} transparent opacity={0.95} />
       </instancedMesh>
     </>
   );

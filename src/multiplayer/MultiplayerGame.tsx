@@ -24,7 +24,7 @@
 import { Component, type ReactNode, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Sky, Environment } from "@react-three/drei";
-import { Raycaster, Vector3, MathUtils, AdditiveBlending, type Group, type PerspectiveCamera, type Mesh, type PointLight } from "three";
+import { Raycaster, Vector3, MathUtils, type Group, type PerspectiveCamera } from "three";
 import { Arena, FitModel } from "../Models";
 import { Scatter } from "../Scatter";
 import { Gun } from "../Gun";
@@ -33,8 +33,9 @@ import { FpvArms } from "../game/FpvArms";
 import { VisionController } from "../game/VisionController";
 import { InputController } from "../game/input";
 import { useControls } from "../game/stores";
-import { CAPSULE } from "../game/contracts";
+import { CAPSULE, type AnimState as FpvAnimState } from "../game/contracts";
 import { playSfx, initAudio } from "../game/sfx";
+import { vfx, Vfx } from "../game/vfx";
 import {
   useValorConnection,
   useLocalPlayer,
@@ -126,6 +127,31 @@ function clipFor(state: AnimState | undefined): string {
   }
 }
 
+// Map the server anim enum to the FPV-arms clip state (the contracts AnimState
+// union AnimatedCharacter crossfades between). So your own hands walk, strafe,
+// crouch and reload from the server's view instead of being frozen in idle.
+function fpvAnimFor(state: AnimState | undefined): FpvAnimState {
+  switch (state?.tag) {
+    case "Walk":
+    case "WalkBack":
+      return "walk";
+    case "StrafeL":
+      return "strafeLeft";
+    case "StrafeR":
+      return "strafeRight";
+    case "Crouch":
+      return "crouchIdle";
+    case "Fire":
+      return "fire";
+    case "Reload":
+      return "reload";
+    case "Death":
+      return "death";
+    default:
+      return "idle";
+  }
+}
+
 function categoryForKill(e: KillEvent): string {
   if (e.isAce) return "ace";
   if (e.isDouble) return "double";
@@ -198,7 +224,12 @@ function RemotePlayerRig({
   const scratch = useRef(new Vector3());
   const frame = useRef(0);
   const groundYRef = useRef(player.position.y);
-  useFrame(() => {
+  // Smoothed render transform. The server lands positions at ~30Hz but we render
+  // at 60+Hz, so writing the raw server pos each frame makes remote players STEP
+  // (the "not smooth" jitter). Exponentially chase the target so they glide.
+  const smoothRef = useRef<{ x: number; y: number; z: number } | null>(null);
+  const yawRef = useRef(Math.atan2(player.aimVector.x, player.aimVector.z) + Math.PI);
+  useFrame((_, dt) => {
     const g = groupRef.current;
     if (!g) return;
     const [ox, oz] = sameTeam ? fanOffset(player.id) : [0, 0];
@@ -212,8 +243,27 @@ function RemotePlayerRig({
         if (h.point.y > -60 && h.point.y < 150) { groundYRef.current = h.point.y; break; }
       }
     }
-    g.position.set(px, groundYRef.current, pz);
-    g.rotation.set(0, Math.atan2(player.aimVector.x, player.aimVector.z) + Math.PI, 0);
+    // Entity interpolation. Snap on first frame / big teleports (respawn) so a
+    // player doesn't ski across the whole arena; otherwise damp toward target.
+    const ty = groundYRef.current;
+    let sm = smoothRef.current;
+    if (!sm || Math.hypot(px - sm.x, pz - sm.z) > 4) {
+      sm = { x: px, y: ty, z: pz };
+      smoothRef.current = sm;
+    } else {
+      const k = 1 - Math.exp(-14 * Math.min(dt, 0.05));
+      sm.x += (px - sm.x) * k;
+      sm.y += (ty - sm.y) * k;
+      sm.z += (pz - sm.z) * k;
+    }
+    g.position.set(sm.x, sm.y, sm.z);
+    // Smooth the facing too (shortest-arc), so turns don't snap.
+    const targetYaw = Math.atan2(player.aimVector.x, player.aimVector.z) + Math.PI;
+    let d = targetYaw - yawRef.current;
+    while (d > Math.PI) d -= Math.PI * 2;
+    while (d < -Math.PI) d += Math.PI * 2;
+    yawRef.current += d * (1 - Math.exp(-14 * Math.min(dt, 0.05)));
+    g.rotation.set(0, yawRef.current, 0);
   });
   return (
     <group ref={groupRef}>
@@ -362,18 +412,19 @@ const SCOPED_FOV = 40;
 const AIM_LERP = 12; // fov damp rate toward target
 const RECOIL_KICK = 0.05; // radians of upward pitch per shot
 const RECOIL_RECOVER = 14; // damp rate back to neutral
+// Gun-barrel offset in the camera's local frame (right, down, forward=-Z) — the
+// muzzle/tracer origin so the streak leaves the held gun, not your eye.
+const MUZZLE_LOCAL = new Vector3(0.18, -0.16, -0.62);
+const TRACER_RANGE = 60; // how far the tracer streaks along the aim (= server MAX_RANGE)
 
 interface VisionInputBridgeProps {
   driver: ValorDriver | null;
   localPlayer: Player | undefined;
   players: Player[];
   arenaRef: React.RefObject<Group | null>;
-  // Set to a positive remaining-time (seconds) on each shot so the MuzzleFlash
-  // component (which shares this ref) lights up for one quick frame burst.
-  fireFlash: React.RefObject<number>;
 }
 
-function VisionInputBridge({ driver, localPlayer, players, arenaRef, fireFlash }: VisionInputBridgeProps) {
+function VisionInputBridge({ driver, localPlayer, players, arenaRef }: VisionInputBridgeProps) {
   const camera = useThree((s) => s.camera);
   const rc = useRef(new Raycaster());
   const rayOrigin = useRef(new Vector3());
@@ -382,6 +433,8 @@ function VisionInputBridge({ driver, localPlayer, players, arenaRef, fireFlash }
   const yaw = useRef(0);
   // Transient recoil pitch (radians). Kicked on fire, damped back to 0.
   const recoilPitch = useRef(0);
+  // Scratch vector for computing the muzzle world position each shot.
+  const muzzlePos = useRef(new Vector3());
   // Have we oriented the camera for the current life yet? (reset on death.)
   const yawInit = useRef(false);
   // Smoothed feet position. Server position lands at 30Hz; we render at 60+Hz,
@@ -454,7 +507,16 @@ function VisionInputBridge({ driver, localPlayer, players, arenaRef, fireFlash }
     if (firePressed && localPlayer.alive && localPlayer.ammo > 0) {
       playSfx("shot");
       recoilPitch.current += RECOIL_KICK;
-      fireFlash.current = 0.05; // seconds of muzzle flash
+      // Muzzle flash + tracer at the gun barrel, streaking along the (assisted)
+      // aim — same pooled VFX single-player uses, so bullets read as real rounds
+      // leaving the gun, not just a sound. Tracer fades in ~60ms so overshooting
+      // the actual hit point along `aim` is invisible.
+      const mz = muzzlePos.current.copy(MUZZLE_LOCAL).applyQuaternion(camera.quaternion).add(camera.position);
+      vfx.muzzle([mz.x, mz.y, mz.z]);
+      vfx.tracer(
+        [mz.x, mz.y, mz.z],
+        [mz.x + aim.x * TRACER_RANGE, mz.y + aim.y * TRACER_RANGE, mz.z + aim.z * TRACER_RANGE],
+      );
     }
     if (reload) playSfx("reload");
 
@@ -532,53 +594,6 @@ function VisionInputBridge({ driver, localPlayer, players, arenaRef, fireFlash }
   });
 
   return null;
-}
-
-// MuzzleFlash — a quick bright pop at the barrel on each shot. Shares the
-// `fireFlash` countdown ref with VisionInputBridge (set to ~0.05s on fire). It
-// tracks the camera every frame and sits at a gun-barrel offset in the camera's
-// local frame, so the flash reads as coming from the held weapon. No flash =
-// invisible + light off (zero cost when not shooting).
-const MUZZLE_OFFSET = new Vector3(0.18, -0.16, -0.62); // right, down, forward(-Z)
-
-function MuzzleFlash({ flash }: { flash: React.RefObject<number> }) {
-  const camera = useThree((s) => s.camera);
-  const mesh = useRef<Mesh>(null);
-  const light = useRef<PointLight>(null);
-  const pos = useRef(new Vector3());
-
-  useFrame((_, dt) => {
-    const m = mesh.current;
-    const l = light.current;
-    if (!m || !l) return;
-    // Park the flash at the barrel: camera position + offset rotated into world.
-    pos.current.copy(MUZZLE_OFFSET).applyQuaternion(camera.quaternion).add(camera.position);
-    m.position.copy(pos.current);
-    m.quaternion.copy(camera.quaternion);
-    l.position.copy(pos.current);
-
-    const t = flash.current;
-    if (t > 0) {
-      flash.current = Math.max(0, t - dt);
-      const k = flash.current / 0.05; // 1 → 0 over the burst
-      m.visible = true;
-      m.scale.setScalar(0.18 + 0.22 * k);
-      l.intensity = 6 * k;
-    } else if (m.visible) {
-      m.visible = false;
-      l.intensity = 0;
-    }
-  });
-
-  return (
-    <group>
-      <mesh ref={mesh} visible={false}>
-        <planeGeometry args={[1, 1]} />
-        <meshBasicMaterial color="#fff2b0" blending={AdditiveBlending} transparent depthWrite={false} />
-      </mesh>
-      <pointLight ref={light} color="#ffd27a" intensity={0} distance={6} decay={2} />
-    </group>
-  );
 }
 
 // ---- DOM overlays --------------------------------------------------------
@@ -845,27 +860,59 @@ export function MultiplayerGame() {
   // raycast can hit ONLY the terrain (never the FPV arms or player rigs).
   const arenaRef = useRef<Group>(null);
 
-  // Muzzle-flash countdown shared between the input bridge (writer, on fire) and
-  // the MuzzleFlash component (reader, renders the pop).
-  const fireFlash = useRef(0);
-
-  // Combat audio from the server's shot stream: play enemy gunfire so you HEAR
-  // the other player shooting, and a hit thock when one of OUR shots lands.
-  // (Our own gunshot already plays instantly on the local fire edge, so we skip
-  // shooterId === us here to avoid a double crack.) Track the highest shot id
-  // seen so we only react to genuinely new rows, not the backlog at mount.
+  // Combat reactions from the server's shot stream. For every NEW shot row we
+  //   • play gunfire (enemy shots only — our own already cracked on the local
+  //     fire edge, so we'd double it),
+  //   • draw a muzzle flash + tracer from the SHOOTER's gun to the hit point (or
+  //     out along their aim) so enemy fire reads as real rounds, not just sound,
+  //   • play a hit thock when one of OUR shots connects.
+  // Track the highest shot id so we only react to genuinely new rows, not the
+  // backlog already in the table at mount.
   const lastShotId = useRef<bigint | null>(null);
   useEffect(() => {
     const myId = localPlayer?.id;
     for (const s of shots) {
-      if (lastShotId.current !== null && s.id > lastShotId.current) {
-        if (s.shooterId !== myId) playSfx("shot", 0.7); // enemy gunfire
-        else if (s.hit) playSfx("hit"); // confirmation our shot connected
+      if (lastShotId.current === null || s.id <= lastShotId.current) continue;
+      const mine = s.shooterId === myId;
+      if (!mine) {
+        playSfx("shot", 0.7); // enemy gunfire
+        const shooter = playersById.get(s.shooterId);
+        if (shooter) {
+          const ox = shooter.position.x;
+          const oy = shooter.position.y + HEAD_OFFSET_Y;
+          const oz = shooter.position.z;
+          let ex = ox + s.aimVector.x * TRACER_RANGE;
+          let ey = oy + s.aimVector.y * TRACER_RANGE;
+          let ez = oz + s.aimVector.z * TRACER_RANGE;
+          if (s.hit && s.victimId != null) {
+            const v = playersById.get(s.victimId);
+            if (v) { ex = v.position.x; ey = v.position.y + 0.9; ez = v.position.z; }
+          }
+          vfx.muzzle([ox, oy, oz]);
+          vfx.tracer([ox, oy, oz], [ex, ey, ez]);
+        }
+      } else if (s.hit) {
+        playSfx("hit"); // our shot connected
       }
     }
     const maxId = shots.reduce((m, s) => (s.id > m ? s.id : m), lastShotId.current ?? -1n);
     lastShotId.current = maxId;
-  }, [shots, localPlayer]);
+  }, [shots, localPlayer, playersById]);
+
+  // Death sounds: watch every player's alive flag for a true→false flip and play
+  // a scream (a sharper, full-volume cue when it's US going down). Driven off the
+  // players table — not the shot row — so it fires reliably even when the lethal
+  // shot and the health update land on different ticks.
+  const alivePrev = useRef<Map<number, boolean>>(new Map());
+  useEffect(() => {
+    const myId = localPlayer?.id;
+    for (const p of players) {
+      if (alivePrev.current.get(p.id) === true && !p.alive) {
+        playSfx("scream", p.id === myId ? 1 : 0.8);
+      }
+      alivePrev.current.set(p.id, p.alive);
+    }
+  }, [players, localPlayer]);
 
   // Driver lifecycle. Spawn one as soon as the connection is ready; tear it
   // down on unmount or when the connection flips.
@@ -1006,15 +1053,18 @@ export function MultiplayerGame() {
               load, the arms just don't show — the scene never goes black. */}
           {joined && localPlayer?.alive ? (
             <AssetBoundary>
-              <FpvArms />
+              <FpvArms animState={fpvAnimFor(localPlayer.animState)} />
             </AssetBoundary>
           ) : null}
-          {joined && localPlayer?.alive ? <MuzzleFlash flash={fireFlash} /> : null}
+          {/* Pooled muzzle flash + tracer renderer (same one single-player uses).
+              Mounted always — it draws BOTH our shots and enemy shots, including
+              while we're dead/spectating, so the firefight reads from any view. */}
+          <Vfx />
         </Suspense>
         <CamRig localPlayer={localPlayer} />
         {joined ? (
           <>
-            <VisionInputBridge driver={driver} localPlayer={localPlayer} players={players} arenaRef={arenaRef} fireFlash={fireFlash} />
+            <VisionInputBridge driver={driver} localPlayer={localPlayer} players={players} arenaRef={arenaRef} />
             {/* Keyboard/mouse fallback — writes the SAME useControls store the
                 webcam does, so testing without a camera still works. */}
             <InputController />

@@ -28,7 +28,11 @@ const RIG_YAW = Math.PI; // face the same way the camera looks (-Z)
 // skinned mesh, so shrinking these bones shrinks the vertices weighted to them).
 const HIDE_BONES = new Set(["mixamorigHead", "mixamorigNeck"]);
 
-export function FpvArms() {
+// `animState` override: single-player omits it and the arms read the local
+// entity store (resolveAnimState). Multiplayer has no local physics store, so it
+// passes the server-derived clip state directly — without this the MP arms were
+// frozen in idle even while walking/reloading.
+export function FpvArms({ animState }: { animState?: AnimState } = {}) {
   const root = useRef<Group>(null);
   const rig = useRef<Group>(null);
   const camera = useThree((s) => s.camera);
@@ -53,13 +57,17 @@ export function FpvArms() {
       });
     }
     for (const b of headBones.current) b.scale.setScalar(0.0001);
-    // Drive the arms from the local player's state (idle/walk/run/fire/reload).
-    const e = useGame.getState().entities[LOCAL_ID];
-    const t = transforms[LOCAL_ID];
-    if (e && t) {
-      const s = resolveAnimState(e, t);
-      if (s !== animRef.current) { animRef.current = s; setAnim(s); }
+    // Drive the arms: MP passes an explicit server-derived state; SP reads the
+    // local entity store (idle/walk/run/fire/reload).
+    let s: AnimState | null = null;
+    if (animState !== undefined) {
+      s = animState;
+    } else {
+      const e = useGame.getState().entities[LOCAL_ID];
+      const t = transforms[LOCAL_ID];
+      if (e && t) s = resolveAnimState(e, t);
     }
+    if (s !== null && s !== animRef.current) { animRef.current = s; setAnim(s); }
   }, 11);
 
   return (

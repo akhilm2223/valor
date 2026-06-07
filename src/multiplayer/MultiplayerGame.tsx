@@ -459,6 +459,8 @@ const RECOIL_RECOVER = 14; // damp rate back to neutral
 const MOVE_SPEED = 3.6;
 const CROUCH_SPEED = 1.6;
 const RELOAD_SEC = 1.1; // auto-reload time when the mag empties
+const STEP_MAX = 0.7; // max height you can step UP onto (curbs ok, truck roofs no)
+const COLLIDE_PAD = 0.35; // look this far past the foot so you stop a bit before a wall
 // Gun-barrel offset in the camera's local frame (right, down, forward=-Z) — the
 // muzzle/tracer origin so the streak leaves the held gun, not your eye.
 const MUZZLE_LOCAL = new Vector3(0.18, -0.16, -0.62);
@@ -489,6 +491,11 @@ function VisionInputBridge({ driver, localPlayer, byId, arenaRef, onLockChange, 
   const recoilPitch = useRef(0);
   // Scratch vector for computing the muzzle world position each shot.
   const muzzlePos = useRef(new Vector3());
+  // Dedicated raycaster + dir vector for the line-of-sight (can't-shoot-through-
+  // walls) check — separate from the ground-snap raycaster so their `far` ranges
+  // don't clobber each other.
+  const losRc = useRef(new Raycaster());
+  const aimDir = useRef(new Vector3());
   // Auto-reload state: seconds left in the current reload; whether we've already
   // sent the refill for this empty mag (so we send reload=true exactly once).
   const reloadTimer = useRef(0);
@@ -510,6 +517,20 @@ function VisionInputBridge({ driver, localPlayer, byId, arenaRef, onLockChange, 
     // LIVE local-player row — fresh position/aim every frame (no re-render churn).
     // Falls back to the React snapshot until the live map is populated.
     const lp = byId.current.get(localPlayer.id) ?? localPlayer;
+
+    // Sample the arena's surface height at (x,z) by raycasting straight down.
+    // Used by both prop collision (below) and the camera ground-snap. Returns
+    // null when there's no ground (off the map edge). Cheap — the arena has a BVH.
+    const sampleGround = (x: number, z: number): number | null => {
+      const arena = arenaRef.current;
+      if (!arena) return null;
+      rc.current.set(rayOrigin.current.set(x, 200, z), DOWN);
+      const hits = rc.current.intersectObject(arena, true);
+      for (const h of hits) {
+        if (h.point.y > -60 && h.point.y < 150) return h.point.y;
+      }
+      return null;
+    };
 
     // ── Face the arena on (re)spawn ────────────────────────────────────────
     // The server orients each team's spawn aim toward the opponent (team A → -Z,
@@ -549,6 +570,32 @@ function VisionInputBridge({ driver, localPlayer, byId, arenaRef, onLockChange, 
     const len = Math.hypot(lx, lz);
     if (len > 1) { lx /= len; lz /= len; }
 
+    // ── Prop collision (client-side, wall-like) ───────────────────────────
+    // You used to walk ONTO trucks/huts because the camera ground-snaps by
+    // raycasting DOWN — over a prop's footprint it snapped to the prop's roof.
+    // Fix: before moving, sample the ground at the spot you're stepping toward;
+    // if it's a sharp step UP (a prop edge, not a gentle terrain slope) block
+    // that direction so you STOP at it like a wall. Test each axis on its own so
+    // you slide along walls. Zero the blocked lean so the server (no collision)
+    // stops at the same spot — no desync. Cheap now that the arena has a BVH.
+    if (lp.alive && smooth.current && (lx !== 0 || lz !== 0)) {
+      const sp = ctrl.crouch ? CROUCH_SPEED : MOVE_SPEED;
+      const reach = sp * Math.min(dtRaw, 0.05) + COLLIDE_PAD;
+      const cx = smooth.current.x, cz = smooth.current.z;
+      const curY = groundY.current;
+      const walkable = (nx: number, nz: number): boolean => {
+        const gy = sampleGround(nx, nz);
+        return gy !== null && gy - curY <= STEP_MAX; // null = off-map → blocked
+      };
+      if (!walkable(cx + lx * reach, cz + lz * reach)) {
+        const okX = lx !== 0 && walkable(cx + lx * reach, cz);
+        const okZ = lz !== 0 && walkable(cx, cz + lz * reach);
+        if (okX && !okZ) lz = 0;
+        else if (okZ && !okX) lx = 0;
+        else { lx = 0; lz = 0; } // cornered → stop
+      }
+    }
+
     // ── Aim → camera-forward, bent onto the nearest enemy by aim assist ────
     const assist = pickAssistAim(lp, byId.current.values(), fx, fz);
     const aim = assist ? { x: assist.x, y: assist.y, z: assist.z } : { x: fx, y: 0, z: fz };
@@ -568,24 +615,50 @@ function VisionInputBridge({ driver, localPlayer, byId, arenaRef, onLockChange, 
       useControls.setState({ firePressed: false, reloadPressed: false });
     }
 
-    // ── Local fire feedback — the server's fire() reducer handles damage, but
-    // it sends back NO muzzle/recoil/sound, so without this the trigger feels
-    // dead even though ammo ticks down. Fire the feel locally on the rising edge
-    // (gated the same way the Driver gates the reducer: alive + ammo) so the
-    // shot looks/sounds fired the instant you pull. reload plays its rack.
+    // ── Line of sight — can't shoot through walls ─────────────────────────
+    // The server's fire() raycast only knows about player capsules, NOT the map,
+    // so aim-assist would happily bend a shot onto an enemy BEHIND a wall and
+    // kill them. We gate the shot here on the SHOOTER's client (it has the arena
+    // BVH): raycast the map along the aim; if a wall is closer than the target,
+    // the shot is BLOCKED — we don't send fire to the server (no kill), and the
+    // tracer stops at the wall. Same client-authoritative hit model single-player
+    // uses. `losBlocked` only matters when actually firing with ammo.
+    const mz = muzzlePos.current.copy(MUZZLE_LOCAL).applyQuaternion(camera.quaternion).add(camera.position);
+    let losBlocked = false;
+    let wallPoint: [number, number, number] | null = null;
+    if (firePressed && lp.alive && lp.ammo > 0 && arenaRef.current) {
+      const dir = aimDir.current.set(aim.x, aim.y, aim.z).normalize();
+      losRc.current.set(mz, dir);
+      losRc.current.far = TRACER_RANGE;
+      const hits = losRc.current.intersectObject(arenaRef.current, true);
+      const wallDist = hits.length ? hits[0].distance : Infinity;
+      // Distance to the locked target's center (only assisted shots can curve
+      // onto a hidden enemy, so that's the case we must block).
+      let targetDist = Infinity;
+      if (assist) {
+        const t = byId.current.get(assist.id);
+        if (t) {
+          targetDist = Math.hypot(t.position.x - mz.x, t.position.y + CENTER_OFFSET_Y - mz.y, t.position.z - mz.z);
+        }
+      }
+      if (wallDist < Math.min(targetDist, TRACER_RANGE) - 0.25) {
+        losBlocked = true;
+        wallPoint = [hits[0].point.x, hits[0].point.y, hits[0].point.z];
+      }
+    }
+
+    // ── Local fire feedback — the server's fire() reducer handles damage, but it
+    // sends back NO muzzle/recoil/sound, so without this the trigger feels dead.
+    // Clear shot: full feedback + tracer along the aim. Blocked shot: it slaps
+    // the wall (tracer to the wall point), no kill.
     if (firePressed && lp.alive && lp.ammo > 0) {
       playSfx("shot");
       recoilPitch.current += RECOIL_KICK;
-      // Muzzle flash + tracer at the gun barrel, streaking along the (assisted)
-      // aim — same pooled VFX single-player uses, so bullets read as real rounds
-      // leaving the gun, not just a sound. Tracer fades in ~60ms so overshooting
-      // the actual hit point along `aim` is invisible.
-      const mz = muzzlePos.current.copy(MUZZLE_LOCAL).applyQuaternion(camera.quaternion).add(camera.position);
       vfx.muzzle([mz.x, mz.y, mz.z]);
-      vfx.tracer(
-        [mz.x, mz.y, mz.z],
-        [mz.x + aim.x * TRACER_RANGE, mz.y + aim.y * TRACER_RANGE, mz.z + aim.z * TRACER_RANGE],
-      );
+      const end: [number, number, number] = losBlocked && wallPoint
+        ? wallPoint
+        : [mz.x + aim.x * TRACER_RANGE, mz.y + aim.y * TRACER_RANGE, mz.z + aim.z * TRACER_RANGE];
+      vfx.tracer([mz.x, mz.y, mz.z], end);
     }
     // ── Auto-reload — when the mag hits empty, rack a fresh one automatically
     // after a short reload time (you don't have to do anything). The client times
@@ -607,7 +680,9 @@ function VisionInputBridge({ driver, localPlayer, byId, arenaRef, onLockChange, 
     if (reload) playSfx("reload");
 
     driver.updateInput(
-      { aim, lean: { x: lx, z: lz }, crouch: ctrl.crouch, firePressed, reload: reload || autoReload },
+      // firePressed gated by line of sight: a wall-blocked shot is NOT sent to
+      // the server, so it can't register a kill through the wall.
+      { aim, lean: { x: lx, z: lz }, crouch: ctrl.crouch, firePressed: firePressed && !losBlocked, reload: reload || autoReload },
       lp,
     );
 

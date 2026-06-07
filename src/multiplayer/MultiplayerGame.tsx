@@ -459,6 +459,7 @@ const RECOIL_RECOVER = 14; // damp rate back to neutral
 const MOVE_SPEED = 3.6;
 const CROUCH_SPEED = 1.6;
 const RELOAD_SEC = 1.1; // auto-reload time when the mag empties
+const EYE_LIFT = 0.4; // raise the MP camera above the base eye height
 const STEP_MAX = 0.7; // max height you can step UP onto (curbs ok, truck roofs no)
 const COLLIDE_PAD = 0.35; // look this far past the foot so you stop a bit before a wall
 // Gun-barrel offset in the camera's local frame (right, down, forward=-Z) — the
@@ -713,7 +714,9 @@ function VisionInputBridge({ driver, localPlayer, byId, arenaRef, onLockChange, 
         }
         smooth.current.y += (p.y - smooth.current.y) * (1 - Math.exp(-18 * dt));
       }
-      const eye = ctrl.crouch ? CAPSULE.crouchEye : CAPSULE.standEye;
+      // Raise the MP first-person camera a bit (EYE_LIFT) — it was sitting low
+      // so the view felt buried behind the bottom HUD. SP keeps the base height.
+      const eye = (ctrl.crouch ? CAPSULE.crouchEye : CAPSULE.standEye) + EYE_LIFT;
       // Ground-snap: the server keeps every player at y=0 with NO gravity, but
       // the arena terrain swings from −5 to +2, so y=0 buries/floats the camera
       // and you see only the sky-coloured background ("all white"). Raycast the

@@ -39,6 +39,7 @@ export const combat: CombatSink = {
     } else {
       g.patch(targetId, { health });
       g.pushEvent({ kind: "hit", by: byId, on: targetId, t });
+      playSfx("hit"); // hitmarker on a non-lethal hit
     }
   },
 };

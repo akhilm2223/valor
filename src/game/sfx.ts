@@ -19,18 +19,21 @@ const SOUND_URLS = {
   rayblast: "/Sounds/flutie8211-ray-gun-blast-1-546936.mp3",
   reload: "/Sounds/dragon-studio-gun-reload-511309.mp3",
   walk: "/Sounds/u_3x9ga8wevj-walking-sound-effect-272246.mp3",
+  hit: "/Sounds/hitmarker_2.mp3",
   scream: "/Sounds/VOXScrm_Wilhelm scream (ID 0477)_BigSoundBank.com.mp3",
 } as const;
 
 export type SfxName = keyof typeof SOUND_URLS;
 
-// Per-clip baseline volume so nothing blows out the mix.
+// Per-clip baseline volume so nothing blows out the mix. The death scream is set
+// deliberately the LOUDEST so it cuts over the shot/hitmarker on a kill.
 const VOLUME: Record<SfxName, number> = {
-  shot: 0.6,
-  rayblast: 0.7,
-  reload: 0.7,
+  shot: 0.55,
+  rayblast: 0.6,
+  reload: 0.6,
   walk: 0.4,
-  scream: 0.9,
+  hit: 0.55,
+  scream: 1.0,
 };
 
 // Cap how much of a clip plays (seconds). The pistol shot mp3 has a long tail —

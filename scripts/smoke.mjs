@@ -5,7 +5,7 @@
 import { chromium } from "playwright";
 import { writeFileSync } from "node:fs";
 
-const URL = "http://localhost:5155/?game";
+const URL = process.env.SMOKE_URL ?? "http://localhost:5174/?game";
 const SHOT = "/tmp/mosh-game.png";
 
 // Headless uses SwiftShader (logic-only; WebGL may not composite into the PNG).

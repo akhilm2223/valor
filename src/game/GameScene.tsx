@@ -28,6 +28,7 @@ import { HUD } from "./HUD";
 import { InputController } from "./input";
 import { registerWorld, clearWorld, raycastShot } from "./hitscan";
 import { tickCombat, combat } from "./combat";
+import { setWalking } from "./sfx";
 import { useGame, transforms } from "./stores";
 import { LOCAL_ID } from "./contracts";
 
@@ -53,6 +54,16 @@ function World() {
 // Drives time-based combat (respawns) once per frame, scene-wide.
 function CombatTicker() {
   useFrame(() => tickCombat(Date.now()));
+  return null;
+}
+
+// Loops the footstep sound while the local player is moving on the ground.
+function Footsteps() {
+  useFrame(() => {
+    const t = transforms[LOCAL_ID];
+    const moving = !!t && t.grounded && Math.hypot(t.forwardSpeed, t.lateralSpeed) > 0.5;
+    setWalking(moving);
+  });
   return null;
 }
 
@@ -116,6 +127,7 @@ function Scene() {
         <Bots count={3} />
         <Vfx />
         <CombatTicker />
+        <Footsteps />
       </Physics>
 
       <InputController />

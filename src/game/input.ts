@@ -15,6 +15,8 @@
 import { useEffect } from "react";
 import { useThree } from "@react-three/fiber";
 import { useControls } from "./stores";
+import { initAudio } from "./sfx";
+import { useLoadout } from "./loadout";
 
 const LOOK_SENS = 0.0022; // radians per pixel of mouse movement
 
@@ -51,6 +53,11 @@ export function InputController() {
         case "KeyR":
           if (down) set({ reloadPressed: true });
           break;
+        case "KeyG":
+          // TEMP debug: swap to the golden gun (→ ray-gun-blast sound). Later
+          // this becomes a real pickup, not a key — see loadout.ts.
+          if (down) useLoadout.getState().toggleGolden();
+          break;
       }
     };
     const onKeyDown = onKey(true);
@@ -64,6 +71,7 @@ export function InputController() {
       }));
     };
     const onMouseDown = (e: MouseEvent) => {
+      initAudio(); // unlock/resume Web Audio on the user gesture (first click)
       if (document.pointerLockElement !== dom) {
         dom.requestPointerLock();
         return;

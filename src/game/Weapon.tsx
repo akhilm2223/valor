@@ -42,6 +42,8 @@ import { useControls, useGame } from "./stores";
 import { raycastShot } from "./hitscan";
 import { combat } from "./combat";
 import { vfx } from "./vfx";
+import { playSfx } from "./sfx";
+import { useLoadout } from "./loadout";
 import { Gun } from "../Gun";
 
 // ── Tunables (§2 tables) ───────────────────────────────────────────────────
@@ -72,6 +74,9 @@ const MUZZLE_FWD = -0.9;
 export function Weapon() {
   const camera = useThree((s) => s.camera);
   const vmRef = useRef<Group>(null);
+  // Equipped gun (drives the viewmodel + which shot sound plays). Re-renders
+  // only when toggled (rare), never per frame.
+  const variant = useLoadout((s) => s.variant);
 
   // ── Per-frame mutable state (refs, never React state) ──────────────────
   const cooldown = useRef(0); // s until next shot allowed
@@ -120,7 +125,9 @@ export function Weapon() {
       combat.applyDamage({ targetId: hit.entityId, amount: SHOT_DAMAGE, fromDir: dirVec, byId: LOCAL_ID });
     }
 
-    // 6. always: muzzle flash + tracer + recoil.
+    // 6. always: shot sound (golden gun → ray-gun-blast) + muzzle flash + tracer
+    //    + recoil. getState() so the sound tracks the live equipped variant.
+    playSfx(useLoadout.getState().variant === "golden" ? "rayblast" : "shot");
     muzzleWorldPos(tmpMuzzle.current);
     const muzzle: Vec3 = [tmpMuzzle.current.x, tmpMuzzle.current.y, tmpMuzzle.current.z];
     vfx.muzzle(muzzle);
@@ -167,6 +174,7 @@ export function Weapon() {
     const me = useGame.getState().entities[LOCAL_ID];
     if (me && me.ammo >= MAG_SIZE) return;
     reloadTimer.current = RELOAD_TIME;
+    playSfx("reload");
     useGame.getState().patch(LOCAL_ID, { reloading: true, fireState: "reloading" });
   }
 
@@ -269,7 +277,7 @@ export function Weapon() {
 
   return (
     <group ref={vmRef}>
-      <Gun length={0.22} variant="normal" />
+      <Gun length={0.22} variant={variant} />
     </group>
   );
 }

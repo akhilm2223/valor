@@ -111,6 +111,10 @@ async function loadAll() {
 
 /** Play a one-shot (overlapping). No-op until audio is unlocked + loaded. */
 export function playSfx(name: SfxName, volume = 1) {
+  // Dev diagnostic: log the death scream + any sound that can't play yet.
+  if (import.meta.env.DEV && (name === "scream" || !S.ctx || !S.buffers[name])) {
+    console.log(`[sfx] ${name} | ctx=${S.ctx?.state ?? "none"} buf=${!!S.buffers[name]}`);
+  }
   if (!S.ctx || !S.master) return;
   const buf = S.buffers[name];
   if (!buf) return;

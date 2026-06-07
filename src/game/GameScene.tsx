@@ -29,6 +29,7 @@ import { InputController } from "./input";
 import { registerWorld, clearWorld, raycastShot } from "./hitscan";
 import { tickCombat, combat } from "./combat";
 import { setWalking } from "./sfx";
+import { initAudio } from "./sfx";
 import { useGame, transforms } from "./stores";
 import { LOCAL_ID } from "./contracts";
 
@@ -54,6 +55,22 @@ function World() {
 // Drives time-based combat (respawns) once per frame, scene-wide.
 function CombatTicker() {
   useFrame(() => tickCombat(Date.now()));
+  return null;
+}
+
+// Bulletproof audio unlock: browsers gate audio behind a user gesture. Unlock on
+// the FIRST click/keypress ANYWHERE (not just the canvas), so it can't be missed
+// if the first interaction lands on a link/HUD. initAudio() is idempotent.
+function AudioUnlock() {
+  useEffect(() => {
+    const unlock = () => initAudio();
+    window.addEventListener("pointerdown", unlock);
+    window.addEventListener("keydown", unlock);
+    return () => {
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("keydown", unlock);
+    };
+  }, []);
   return null;
 }
 
@@ -148,6 +165,7 @@ export function Game() {
       </Canvas>
 
       <HUD />
+      <AudioUnlock />
 
       <a
         href="?"

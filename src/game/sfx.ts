@@ -27,7 +27,7 @@ const SOUND_URLS = {
   reload: "/Sounds/dragon-studio-gun-reload-511309.mp3",
   walk: "/Sounds/u_3x9ga8wevj-walking-sound-effect-272246.mp3",
   hit: "/Sounds/hitmarker_2.mp3",
-  scream: "/Sounds/VOXScrm_Wilhelm scream (ID 0477)_BigSoundBank.com.mp3",
+  scream: "/Sounds/wilhelm-scream.mp3",
 } as const;
 
 export type SfxName = keyof typeof SOUND_URLS;

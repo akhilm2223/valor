@@ -420,6 +420,22 @@ export function MultiplayerGame() {
   const shots = useShots(conn, 5);
   const localPlayer = useLocalPlayer(conn, identity);
 
+  // Live refs mirroring the hook return values — the dev hook below exposes
+  // these via getters so an automated smoke script always reads the latest
+  // tick, not the snapshot captured at mount.
+  const localPlayerRef = useRef(localPlayer);
+  const playersRef = useRef(players);
+  const matchRef = useRef(match);
+  useEffect(() => {
+    localPlayerRef.current = localPlayer;
+  }, [localPlayer]);
+  useEffect(() => {
+    playersRef.current = players;
+  }, [players]);
+  useEffect(() => {
+    matchRef.current = match;
+  }, [match]);
+
   const playersById = useMemo(() => {
     const map = new Map<number, Player>();
     for (const p of players) map.set(p.id, p);
@@ -447,6 +463,33 @@ export function MultiplayerGame() {
       setDriver(null);
     };
   }, [conn, status]);
+
+  // Dev-only handle so an automated browser smoke test can drive the live
+  // multiplayer session — fire reducers directly, inspect server state — and
+  // never leak into the production bundle (import.meta.env.DEV guard). Mirrors
+  // src/game/GameScene.tsx's `window.__mosh` pattern. The getters read through
+  // the refs above so callers always see the latest tick, not a stale closure.
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    if (!conn || !driver || !identity) return;
+    (window as unknown as { __valor?: unknown }).__valor = {
+      conn,
+      driver,
+      identity,
+      get localPlayer() {
+        return localPlayerRef.current;
+      },
+      get players() {
+        return playersRef.current;
+      },
+      get match() {
+        return matchRef.current;
+      },
+    };
+    return () => {
+      delete (window as { __valor?: unknown }).__valor;
+    };
+  }, [conn, driver, identity]);
 
   // Caster — Tier 1 barks on live kill events. We share the AudioQueue with
   // the rest of the app so kills only ever play once even when #caster/live

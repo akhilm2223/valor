@@ -23,7 +23,7 @@
 
 import { Component, type ReactNode, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { Raycaster, Vector3, MathUtils, type Group, type PerspectiveCamera } from "three";
+import { Raycaster, Vector3, MathUtils, MeshLambertMaterial, type Group, type PerspectiveCamera, type Mesh, type MeshStandardMaterial, type Material } from "three";
 import { Arena, FitModel } from "../Models";
 import { Scatter } from "../Scatter";
 import { Gun } from "../Gun";
@@ -287,6 +287,48 @@ function RemotePlayerRig({
       </mesh>
     </group>
   );
+}
+
+// Strip "beauty" off the map for pure performance. The arena GLB ships PBR
+// materials (MeshStandardMaterial) whose metalness/roughness specular is the
+// shiny/glossy look — and a costly per-pixel shader. Convert every arena/Scatter
+// mesh to flat matte MeshLambertMaterial: no specular, far cheaper shader, runs
+// on weak GPUs. Keeps the diffuse texture + colour so the map still reads. Runs
+// the first ~3s (to also catch Scatter's async props), idempotent, then stops.
+function MatteMap({ groupRef }: { groupRef: React.RefObject<Group | null> }) {
+  const frames = useRef(0);
+  useFrame(() => {
+    if (frames.current > 180) return; // ~3s at 60fps, then leave it alone
+    frames.current++;
+    const g = groupRef.current;
+    if (!g) return;
+    g.traverse((o) => {
+      const mesh = o as Mesh;
+      if (!(mesh as unknown as { isMesh?: boolean }).isMesh) return;
+      if (mesh.userData.matte) return;
+      const convert = (m: Material): Material => {
+        const std = m as MeshStandardMaterial;
+        if (!std.isMeshStandardMaterial) return m;
+        const lam = new MeshLambertMaterial({
+          map: std.map ?? null,
+          color: std.color,
+          vertexColors: std.vertexColors,
+          transparent: std.transparent,
+          opacity: std.opacity,
+          alphaTest: std.alphaTest,
+          side: std.side,
+          name: std.name,
+        });
+        std.dispose(); // free the PBR shader/uniforms from the GPU
+        return lam;
+      };
+      mesh.material = Array.isArray(mesh.material)
+        ? mesh.material.map(convert)
+        : convert(mesh.material);
+      mesh.userData.matte = true;
+    });
+  });
+  return null;
 }
 
 // Mounts useSpectatorCam inside the Canvas (the hook needs useFrame/useThree).
@@ -1050,6 +1092,7 @@ export function MultiplayerGame() {
             <Arena />
             <Scatter />
           </group>
+          <MatteMap groupRef={arenaRef} />{/* flatten arena PBR → cheap matte */}
           {/* First-person: hide our own body while alive (camera sits at the
               eye). Render it when dead so the spectator orbit sees the corpse. */}
           {joined && localPlayer && !localPlayer.alive ? (

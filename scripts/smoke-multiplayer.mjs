@@ -49,8 +49,11 @@ function record(step, ok, expected, observed, note) {
   console.log(`[${tag}] ${step}` + (ok ? "" : ` — expected ${expected}, got ${observed}${note ? ` (${note})` : ""}`));
 }
 
+const STDB_TARGET = process.env.STDB_TARGET ?? "local";
+const STDB_DB = process.env.STDB_DB ?? "valor";
+
 function sql(query) {
-  const out = execSync(`${PATH_PREFIX} && spacetime sql -s local valor ${JSON.stringify(query)}`, {
+  const out = execSync(`${PATH_PREFIX} && spacetime sql -s ${STDB_TARGET} ${STDB_DB} ${JSON.stringify(query)}`, {
     shell: "/bin/zsh",
     encoding: "utf8",
   });
@@ -186,7 +189,7 @@ async function joinTab(page, name) {
     },
     { timeout: 15000 },
   );
-  await page.click('button[type="submit"]');
+  await page.click('button[type="submit"]', { force: true });
   // Wait for the dev hook to expose a live alive local player.
   const ok = await waitForValor(
     page,
@@ -244,10 +247,10 @@ const akhilId = bRow ? Number(bRow.id) : null;
 // ---- step 6: move test (tab A holds W) ----------------------------------
 
 console.log("[6/15] move test — tab A holds W for 800ms");
-// Snapshot pre-move position via SQL (z column).
-let posRows = snapSql("pre-move-positions", `SELECT id, name, position FROM players`);
-const aBefore = posRows.find((r) => unq(r.name) === "Aidan");
-const aBeforeZ = aBefore ? Number(JSON.parse(aBefore.position).z) : null;
+// Read pre-move z from tab A's live dev hook. SpacetimeDB SQL can't project
+// composite-typed columns directly, so we use the client-side view (which
+// reflects the same authoritative `players` row Maincloud just pushed us).
+const aBeforeZ = await pageA.evaluate(() => window.__valor?.localPlayer?.position?.z ?? null);
 
 await pageA.bringToFront();
 // Focus the canvas so keydown actually feeds useKeys (which listens on
@@ -258,9 +261,7 @@ await pageA.waitForTimeout(800);
 await pageA.keyboard.up("KeyW");
 await pageA.waitForTimeout(300); // server tick catch-up
 
-posRows = snapSql("post-move-positions", `SELECT id, name, position FROM players`);
-const aAfter = posRows.find((r) => unq(r.name) === "Aidan");
-const aAfterZ = aAfter ? Number(JSON.parse(aAfter.position).z) : null;
+const aAfterZ = await pageA.evaluate(() => window.__valor?.localPlayer?.position?.z ?? null);
 const dz = aBeforeZ != null && aAfterZ != null ? aBeforeZ - aAfterZ : null;
 // We expect z to decrease (forward is -z by the camera basis). Conservative
 // lower bound: 1.5 m. Theoretical max = MOVE_SPEED (3.6) * 0.8s ≈ 2.88m.

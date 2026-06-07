@@ -215,6 +215,10 @@ function RemotePlayerRig({
 }) {
   const ringColor = player.team === 0 ? "#4a90e2" : "#e25555";
   const sameTeam = localTeam !== undefined && player.team === localTeam;
+  // Identity glow: enemies glow RED, teammates green — so you can tell sides at
+  // a glance even before you read the model.
+  const enemy = localTeam !== undefined && player.team !== localTeam;
+  const glowColor = enemy ? "#ff3030" : "#36d46e";
   const outlineRef = useRef<Group>(null);
 
   // Ground-snap the body to the terrain, like the camera. The server keeps every
@@ -283,6 +287,9 @@ function RemotePlayerRig({
         animation={clipFor(player.animState)}
         castShadow
       />
+      {/* Identity glow — a colored light hugging the body (red = enemy, green =
+          ally) so sides read instantly. Short range so it doesn't wash the map. */}
+      <pointLight position={[0, 1.1, 0]} color={glowColor} intensity={enemy ? 5 : 2.5} distance={3.2} decay={2} />
       {/* Team ring — slightly above the ground so z-fighting with the arena */}
       {/* mesh doesn't strobe. Emissive so it reads in the fog. */}
       <mesh position={[0, 0.03, 0]} rotation={[-Math.PI / 2, 0, 0]}>
@@ -1437,7 +1444,7 @@ export function MultiplayerGame() {
 
       <MatchHud match={match} />
       <PlayerHud player={localPlayer} />
-      {inMatch ? <Minimap byId={byId} localId={localPlayer?.id} localTeam={localPlayer?.team} /> : null}
+      {joined && localPlayer ? <Minimap byId={byId} localId={localPlayer.id} localTeam={localPlayer.team} /> : null}
       <KillFeed kills={shots} playersById={playersById} />
       <SpectatorOverlay localPlayer={localPlayer} match={match} />
       <MatchBanner match={match} players={players} />

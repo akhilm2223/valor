@@ -17,7 +17,7 @@
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { Canvas } from "@react-three/fiber";
 import { Environment, Sky, useGLTF, Text } from "@react-three/drei";
-import { Group, Mesh } from "three";
+import { Group, Mesh, AdditiveBlending } from "three";
 import { useRef } from "react";
 import {
   connectValor,
@@ -46,16 +46,48 @@ useGLTF.preload("/models/arena_opt.glb");
 function PlayerMarker({ player }: { player: Player }) {
   const ref = useRef<Group>(null!);
   // Team A = blue, Team B = red. Dead = grey + dimmed.
+  // The vote winner carries the Golden Gun — light them up gold.
+  const golden = player.alive && player.hasGoldenGun;
   const color = !player.alive ? "#555" : player.team === 0 ? "#7db0ff" : "#ff8a6e";
+  const pillColor = golden ? "#ffd277" : color;
   const opacity = player.alive ? 1 : 0.35;
   return (
-    <group ref={ref} position={[player.position.x, player.position.y + 0.9, player.position.z]}>
+    <group ref={ref} position={[player.position.x, player.position.y + 0.77, player.position.z]}>
+      {/* Ground pill — a glowing ring + soft disc at the player's feet so
+          spectators can track everyone from the overhead view. Turns GOLD and
+          brightens for the Golden-Gun holder. The group origin sits at the
+          capsule's CENTER (0.77 = half the 1.54-tall capsule) so its feet rest
+          on the ground; the pill drops to local y = -0.77 to sit flush on it. */}
+      <mesh position={[0, -0.77, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+        <ringGeometry args={[0.34, 0.52, 40]} />
+        <meshStandardMaterial
+          color={pillColor}
+          emissive={pillColor}
+          emissiveIntensity={golden ? 1.6 : 0.7}
+          transparent
+          opacity={opacity}
+          depthWrite={false}
+        />
+      </mesh>
+      <mesh position={[0, -0.765, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+        <circleGeometry args={[0.34, 40]} />
+        <meshBasicMaterial
+          color={pillColor}
+          transparent
+          opacity={golden ? 0.5 : 0.22}
+          blending={AdditiveBlending}
+          depthWrite={false}
+          toneMapped={false}
+        />
+      </mesh>
       {/* Body — short capsule. */}
       <mesh castShadow>
         <capsuleGeometry args={[0.32, 0.9, 4, 12]} />
         <meshStandardMaterial color={color} transparent opacity={opacity} roughness={0.7} />
       </mesh>
-      {/* Aim indicator — a tiny barrel sticking out of the chest along aim. */}
+      {/* Aim indicator — a tiny barrel sticking out of the chest along aim. This
+          is the spectator stand-in for the held gun, so it turns GOLD when the
+          player holds the Golden Gun. */}
       {player.alive ? (
         <mesh
           position={[
@@ -64,8 +96,14 @@ function PlayerMarker({ player }: { player: Player }) {
             player.aimVector.z * 0.55,
           ]}
         >
-          <boxGeometry args={[0.1, 0.1, 0.6]} />
-          <meshStandardMaterial color="#fff" emissive={color} emissiveIntensity={0.4} />
+          <boxGeometry args={golden ? [0.14, 0.14, 0.7] : [0.1, 0.1, 0.6]} />
+          <meshStandardMaterial
+            color={golden ? "#ffd277" : "#fff"}
+            emissive={golden ? "#ffb733" : color}
+            emissiveIntensity={golden ? 1.2 : 0.4}
+            metalness={golden ? 1 : 0}
+            roughness={golden ? 0.2 : 0.5}
+          />
         </mesh>
       ) : null}
       <Text

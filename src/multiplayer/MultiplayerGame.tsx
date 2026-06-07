@@ -175,7 +175,7 @@ function LocalPlayerRig({ player }: { player: Player | undefined }) {
       <FitModel
         url={skinForTeam(player.team)}
         height={1.8}
-        hold={<Gun length={0.22} variant="normal" />}
+        hold={<Gun length={0.22} variant={player.hasGoldenGun ? "golden" : "normal"} />}
         animation={clipFor(player.animState)}
         castShadow
       />
@@ -283,7 +283,7 @@ function RemotePlayerRig({
       <FitModel
         url={skinForTeam(player.team)}
         height={1.8}
-        hold={<Gun length={0.22} variant="normal" />}
+        hold={<Gun length={0.22} variant={player.hasGoldenGun ? "golden" : "normal"} />}
         animation={clipFor(player.animState)}
         castShadow
       />

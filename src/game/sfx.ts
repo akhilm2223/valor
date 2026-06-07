@@ -33,6 +33,13 @@ const VOLUME: Record<SfxName, number> = {
   scream: 0.9,
 };
 
+// Cap how much of a clip plays (seconds). The pistol shot mp3 has a long tail —
+// only the first ~0.7s is the crack, so we trim it (tune this to taste, 0–1s).
+// Clips not listed play in full.
+const MAX_S: Partial<Record<SfxName, number>> = {
+  shot: 0.7,
+};
+
 let ctx: AudioContext | null = null;
 let master: GainNode | null = null;
 let loading = false;
@@ -82,9 +89,22 @@ export function playSfx(name: SfxName, volume = 1) {
   const src = ctx.createBufferSource();
   src.buffer = buf;
   const g = ctx.createGain();
-  g.gain.value = volume * VOLUME[name];
+  const vol = volume * VOLUME[name];
+  g.gain.value = vol;
   src.connect(g).connect(master);
-  src.start();
+
+  const dur = MAX_S[name];
+  if (dur != null) {
+    // Play only the first `dur` seconds, with a short fade so the cut-off
+    // doesn't click.
+    const now = ctx.currentTime;
+    const rel = Math.min(0.04, dur * 0.25);
+    g.gain.setValueAtTime(vol, now + dur - rel);
+    g.gain.linearRampToValueAtTime(0, now + dur);
+    src.start(0, 0, dur);
+  } else {
+    src.start();
+  }
 }
 
 function startWalk() {

@@ -120,11 +120,10 @@ function Scene() {
 
       <Physics timeStep={1 / 60}>
         <World />
-        {/* Spawn just above the measured plaza floor (feet ~-3.76) so the player
-            settles instantly instead of free-falling several metres. */}
-        {/* Spawn on the real plaza ground (~y -7, per the studio's dialed-in stand
-            point), capsule centre a bit above so it settles instead of falling. */}
-        <PlayerController spawn={[10, -6, -6]} />
+        {/* Spawn on the verified-solid plaza near the bots (floor feet ~-3.76),
+            capsule centre just above so it settles instantly. NOTE: [10,-6,-6]
+            was over a hole in the carved map → player fell through. */}
+        <PlayerController spawn={[0, -2.5, 6]} />
         <Weapon />
         <Bots count={3} />
         <Vfx />

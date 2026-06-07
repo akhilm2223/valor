@@ -54,6 +54,7 @@ type KinematicCharacterController = ReturnType<
 >;
 import { CAPSULE, LOCAL_ID, type Transform, type Vec3 } from "./contracts";
 import { makeEntity, makeTransform, transforms, useControls, useGame } from "./stores";
+import { raycastShot } from "./hitscan";
 
 // ── Tunables (movement research) ────────────────────────────────────────
 const WALK_SPEED = 4.0; // m/s standing
@@ -70,6 +71,7 @@ const SNAP_DIST = 0.3;
 const MAX_SLOPE_CLIMB = MathUtils.degToRad(45);
 const MIN_SLOPE_SLIDE = MathUtils.degToRad(30);
 const CROUCH_LERP = 10.0; // crouch transition rate (1/s)
+const FALL_LIMIT = -50.0; // y below which we assume a fall off the map → respawn
 
 export function PlayerController({ spawn = [0, 1.2, 6] as Vec3 }: { spawn?: Vec3 }) {
   const camera = useThree((s) => s.camera);
@@ -89,6 +91,9 @@ export function PlayerController({ spawn = [0, 1.2, 6] as Vec3 }: { spawn?: Vec3
   const crouchAmount = useRef(0); // 0..1
   // The transform object we own and mutate in place (never reallocate).
   const tRef = useRef<Transform | null>(null);
+  // Spawn AFTER floor-snapping (capsule center on the real floor) — also the
+  // respawn target for the fall-safety net.
+  const resolvedSpawn = useRef<Vec3>(spawn);
 
   // Scratch vectors (avoid per-frame allocation).
   const camPos = useRef(new Vector3());
@@ -96,19 +101,39 @@ export function PlayerController({ spawn = [0, 1.2, 6] as Vec3 }: { spawn?: Vec3
   const fwd = useRef(new Vector3());
   const right = useRef(new Vector3());
 
-  // ── Seed entity + transform, init camera facing ────────────────────────
+  // ── Seed entity + transform, floor-snap the spawn, init camera ─────────
   useEffect(() => {
     const game = useGame.getState();
+
+    // Floor-snap: drop a ray from just above the spawn onto the arena (the world
+    // BVH is registered by <World/> which mounts first) and place the capsule
+    // CENTER exactly on the floor. The player then materialises standing — no
+    // fall, so it can't tunnel through the thin/lower carved geometry. Cast from
+    // only slightly above so a roof/overhang isn't picked instead of the floor.
+    const probe = raycastShot([spawn[0], spawn[1] + 2.5, spawn[2]], [0, -1, 0], 12);
+    const centerY =
+      probe && probe.kind === "world"
+        ? probe.point[1] + CAPSULE.standHalfHeight + CAPSULE.radius + 0.02
+        : spawn[1]; // no floor found → keep spawn (gravity + fall-safety handle it)
+    const s: Vec3 = [spawn[0], centerY, spawn[2]];
+    resolvedSpawn.current = s;
+
     if (!game.entities[LOCAL_ID]) {
-      game.upsert(makeEntity(LOCAL_ID, "blue", "/models/character_a.glb", false), spawn, 0);
+      game.upsert(makeEntity(LOCAL_ID, "blue", "/models/character_a.glb", false), s, 0);
     }
-    // Ensure a transform exists even if the entity was already present.
-    if (!transforms[LOCAL_ID]) transforms[LOCAL_ID] = makeTransform(spawn, 0);
+    if (!transforms[LOCAL_ID]) transforms[LOCAL_ID] = makeTransform(s, 0);
     tRef.current = transforms[LOCAL_ID];
+    tRef.current.pos[0] = s[0];
+    tRef.current.pos[1] = s[1];
+    tRef.current.pos[2] = s[2];
     yaw.current = tRef.current.yaw;
     pitch.current = tRef.current.pitch;
-    // spawn is the capsule CENTER; place the camera at center + standing eye.
-    camera.position.set(spawn[0], spawn[1] + (CAPSULE.standEye - CAPSULE.standHalfHeight - CAPSULE.radius), spawn[2]);
+
+    // Move the physics body to the snapped center (it was created at `spawn`).
+    bodyRef.current?.setTranslation({ x: s[0], y: s[1], z: s[2] }, true);
+
+    // s is the capsule CENTER; place the camera at center + standing eye.
+    camera.position.set(s[0], s[1] + (CAPSULE.standEye - CAPSULE.standHalfHeight - CAPSULE.radius), s[2]);
     camera.rotation.order = "YXZ";
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -187,9 +212,22 @@ export function PlayerController({ spawn = [0, 1.2, 6] as Vec3 }: { spawn?: Vec3
     const grounded = controller.computedGrounded();
 
     const cur = rb.translation();
-    const nx = cur.x + move.x;
-    const ny = cur.y + move.y;
-    const nz = cur.z + move.z;
+    let nx = cur.x + move.x;
+    let ny = cur.y + move.y;
+    let nz = cur.z + move.z;
+
+    // Fall safety: the carved arena has holes/edges — if we drop off the world,
+    // snap back to spawn instead of falling forever.
+    if (ny < FALL_LIMIT) {
+      const s = resolvedSpawn.current;
+      nx = s[0];
+      ny = s[1];
+      nz = s[2];
+      vy.current = 0;
+      hvx.current = 0;
+      hvz.current = 0;
+    }
+
     rb.setNextKinematicTranslation({ x: nx, y: ny, z: nz });
 
     if (grounded) vy.current = GROUND_STICK_VY; // hold the ground (snap stick)

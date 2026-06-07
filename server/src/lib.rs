@@ -287,6 +287,38 @@ pub fn set_ready(ctx: &ReducerContext, ready: bool) {
     }
 }
 
+// set_team — pick your side in the lobby (max 2 per team). Moves you to that
+// team's spawn and clears ready. Lobby only.
+#[spacetimedb::reducer]
+pub fn set_team(ctx: &ReducerContext, team: u8) {
+    let me = ctx.sender();
+    let Some(m) = ctx.db.game_match().id().find(0) else { return };
+    if m.state != MatchState::Lobby || team > 1 {
+        return;
+    }
+    let Some(p) = ctx.db.players().identity().find(me) else { return };
+    if p.team == team {
+        return;
+    }
+    // 2-per-team cap.
+    let mut count = 0u32;
+    for q in ctx.db.players().iter() {
+        if q.id != p.id && q.team == team {
+            count += 1;
+        }
+    }
+    if count >= 2 {
+        return; // that side is full
+    }
+    ctx.db.players().id().update(Player {
+        team,
+        position: team_spawn(team),
+        aim_vector: team_aim(team),
+        ready: false,
+        ..p
+    });
+}
+
 // =============================================================================
 // submit_input — per-tick player intent. Movement integrates in tick().
 // =============================================================================

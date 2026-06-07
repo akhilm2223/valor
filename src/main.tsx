@@ -10,6 +10,7 @@ import { SpectatorRoute } from "./spectator/SpectatorRoute";
 import { JoinWall } from "./spectator/JoinWall";
 import { MultiplayerGame } from "./multiplayer/MultiplayerGame";
 import { Lobby } from "./lobby/Lobby";
+import { BroadcastView } from "./broadcast/BroadcastView";
 
 // Screens (lobby is the front door now):
 //   /                              → Lobby — pick character, invite, Play
@@ -23,6 +24,7 @@ import { Lobby } from "./lobby/Lobby";
 //   /#spectator                    → Phase 4 fixed-angle spectator camera (read-only)
 //   /#spectator/freefly            → Phase 4 spectator with touch orbit + pinch zoom
 //   /#join                         → Full-screen QR wall for projecting "scan to spectate"
+//   /#broadcast                    → Sports-style 2x2 POV broadcast + commentary rail
 function Root() {
   // Track the hash so Akhil's #game link still works without a full reload.
   const [hash, setHash] = useState(window.location.hash);
@@ -41,6 +43,7 @@ function Root() {
   if (hash === "#multiplayer") return <MultiplayerGame />;
   if (hash === "#spectator" || hash === "#spectator/freefly") return <SpectatorRoute />;
   if (hash === "#join") return <JoinWall />;
+  if (hash === "#broadcast") return <BroadcastView />;
   if (hash === "#studio") return <App />;
   return <Lobby />;
 }

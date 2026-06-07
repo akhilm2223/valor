@@ -23,9 +23,12 @@ const ROUND_END_COOLDOWN_MS: i64 = 5_000; // post-round pause before auto-restar
 const MATCH_LENGTH_ROUNDS: u32 = 5; // after this many rounds match ends
 const MATCH_END_COOLDOWN_MS: i64 = 8_000; // pause on the final scoreboard, then auto-reset to Lobby
 
-// Team spawn points (Z separates A from B; arena is roughly XY square at y=0).
-const SPAWN_A: Vec3 = Vec3 { x: 0.0, y: 0.0, z: 8.0 };
-const SPAWN_B: Vec3 = Vec3 { x: 0.0, y: 0.0, z: -8.0 };
+// Team spawn points: OPPOSITE DIAGONAL CORNERS of the open plaza, not the centre
+// line. Scatter.tsx keeps the prop ring outside radius 14, so r≈11.3 here (8,8)
+// is guaranteed clear ground. Each team starts in its own corner and faces the
+// arena centre (team_aim), so respawns no longer dump everyone in the middle.
+const SPAWN_A: Vec3 = Vec3 { x: 8.0, y: 0.0, z: 8.0 };
+const SPAWN_B: Vec3 = Vec3 { x: -8.0, y: 0.0, z: -8.0 };
 
 // =============================================================================
 // Shared types
@@ -210,6 +213,7 @@ pub fn join(ctx: &ReducerContext, name: String) {
             health: MAX_HEALTH,
             ammo: MAG_SIZE,
             position: team_spawn(team),
+            aim_vector: team_aim(team),
             ..p
         });
         return;
@@ -225,7 +229,7 @@ pub fn join(ctx: &ReducerContext, name: String) {
         name,
         team,
         position: team_spawn(team),
-        aim_vector: Vec3 { x: 0.0, y: 0.0, z: if team == 0 { -1.0 } else { 1.0 } },
+        aim_vector: team_aim(team),
         lean: Vec2::default(),
         crouch: false,
         health: MAX_HEALTH,
@@ -507,6 +511,7 @@ fn reset_match_impl(ctx: &ReducerContext) {
         let team = p.team;
         ctx.db.players().id().update(Player {
             position: team_spawn(team),
+            aim_vector: team_aim(team),
             health: MAX_HEALTH,
             ammo: MAG_SIZE,
             alive: true,
@@ -532,6 +537,7 @@ fn start_round_impl(ctx: &ReducerContext) {
         let team = p.team;
         ctx.db.players().id().update(Player {
             position: team_spawn(team),
+            aim_vector: team_aim(team),
             health: MAX_HEALTH,
             ammo: MAG_SIZE,
             alive: true,
@@ -637,6 +643,18 @@ pub fn on_disconnect(ctx: &ReducerContext) {
 
 fn team_spawn(team: u8) -> Vec3 {
     if team == 0 { SPAWN_A } else { SPAWN_B }
+}
+
+// Facing the arena centre from each corner spawn (normalized). Team A at (8,8)
+// looks toward (-1,-1)/√2; team B at (-8,-8) looks toward (1,1)/√2. The client
+// seeds its camera yaw from this on (re)spawn, so you face the fight, not a wall.
+fn team_aim(team: u8) -> Vec3 {
+    const INV_SQRT2: f32 = 0.70710677;
+    if team == 0 {
+        Vec3 { x: -INV_SQRT2, y: 0.0, z: -INV_SQRT2 }
+    } else {
+        Vec3 { x: INV_SQRT2, y: 0.0, z: INV_SQRT2 }
+    }
 }
 
 fn team_counts(ctx: &ReducerContext) -> (u32, u32) {

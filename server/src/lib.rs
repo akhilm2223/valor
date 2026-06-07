@@ -304,9 +304,9 @@ pub fn join(ctx: &ReducerContext, name: String) {
         alive: true,
         anim_state: AnimState::Idle,
         kills: 0,
-<<<<<<< C:/Users/akhil/AppData/Local/Temp/merged.rs
         deaths: 0,
         ready: false,
+        has_golden_gun: false,
     });
 }
 
@@ -356,9 +356,6 @@ pub fn set_team(ctx: &ReducerContext, team: u8) {
         aim_vector: team_aim(team),
         ready: false,
         ..p
-=======
-        has_golden_gun: false,
->>>>>>> C:/Users/akhil/AppData/Local/Temp/his.rs
     });
 }
 
@@ -471,7 +468,6 @@ pub fn fire(ctx: &ReducerContext, aim_vector: Vec3) {
         }
     }
 
-<<<<<<< C:/Users/akhil/AppData/Local/Temp/merged.rs
     // Apply damage and decide `killed` BEFORE inserting the shot, so the kill feed
     // can key off the one fatal shot instead of every hit.
     let mut hit = false;
@@ -482,35 +478,6 @@ pub fn fire(ctx: &ReducerContext, aim_vector: Vec3) {
         hit = true;
         victim_id = Some(vid);
         damage = SHOT_DAMAGE;
-=======
-    // Golden Gun: if the shooter has the gun, damage equals the victim's
-    // current HP — instant kill regardless of remaining health. Otherwise
-    // standard SHOT_DAMAGE applies. (Computed inline because we need the
-    // victim's HP, which is looked up after the raycast resolves.)
-    let (hit, victim_id, damage) = match best {
-        Some((vid, _)) => {
-            let dmg = if shooter.has_golden_gun {
-                ctx.db.players().id().find(vid).map(|v| v.health).unwrap_or(SHOT_DAMAGE)
-            } else {
-                SHOT_DAMAGE
-            };
-            (true, Some(vid), dmg)
-        }
-        None => (false, None, 0),
-    };
-
-    ctx.db.shots().insert(Shot {
-        id: 0,
-        shooter_id: shooter.id,
-        aim_vector: dir,
-        hit,
-        victim_id,
-        damage,
-        fired_at: ctx.timestamp,
-    });
-
-    if let Some(vid) = victim_id {
->>>>>>> C:/Users/akhil/AppData/Local/Temp/his.rs
         if let Some(victim) = ctx.db.players().id().find(vid) {
             let new_health = victim.health.saturating_sub(SHOT_DAMAGE);
             let now_alive = new_health > 0;
@@ -591,10 +558,6 @@ pub fn tick(ctx: &ReducerContext, _arg: TickSchedule) {
         }
     }
 
-<<<<<<< C:/Users/akhil/AppData/Local/Temp/merged.rs
-=======
-    let Some(m) = ctx.db.game_match().id().find(0) else { return };
-
     // Golden Gun vote state machine — runs orthogonally to round state. Both
     // transitions are time-driven; finalize_golden_vote handles tally + award.
     let now_us = ctx.timestamp.to_micros_since_unix_epoch();
@@ -616,7 +579,6 @@ pub fn tick(ctx: &ReducerContext, _arg: TickSchedule) {
     // Re-read in case finalize_golden_vote / reveal-end changed the row.
     let Some(m) = ctx.db.game_match().id().find(0) else { return };
 
->>>>>>> C:/Users/akhil/AppData/Local/Temp/his.rs
     match m.state {
         MatchState::Lobby => {
             // Start only when BOTH teams have a player AND everyone has readied up.
@@ -960,11 +922,8 @@ pub fn on_disconnect(ctx: &ReducerContext) {
     // team auto-balance and rendering both stay honest.
     let me = ctx.sender();
     if let Some(p) = ctx.db.players().identity().find(me) {
-<<<<<<< C:/Users/akhil/AppData/Local/Temp/merged.rs
         ctx.db.players().id().delete(p.id);
     }
-    // Also drop them from the spectator table if they were watching.
-    ctx.db.spectators().identity().delete(me);
 
     // Lobby rule: a 1v1 needs BOTH sides present. If someone leaves while a match
     // is in progress, abort it and drop back to a fresh Lobby — a quit/refresh is
@@ -981,14 +940,6 @@ pub fn on_disconnect(ctx: &ReducerContext) {
                 reset_match_impl(ctx);
             }
         }
-=======
-        ctx.db.players().id().update(Player {
-            alive: false,
-            // Disconnecting forfeits the gun, same as dying.
-            has_golden_gun: false,
-            ..p
-        });
->>>>>>> C:/Users/akhil/AppData/Local/Temp/his.rs
     }
     ctx.db.spectators().identity().delete(me);
     // Drop any active golden-gun vote from this identity.

@@ -48,6 +48,11 @@ const buffers: Partial<Record<SfxName, AudioBuffer>> = {};
 // Looping walk state.
 let walkSource: AudioBufferSourceNode | null = null;
 let walkWanted = false;
+let walkCrouched = false;
+// Crouched footsteps: half playbackRate slows the loop ~50% AND drops the pitch
+// an octave (playbackRate couples speed + pitch in Web Audio) — exactly the
+// "slower and pitched down" feel.
+const CROUCH_RATE = 0.5;
 
 /** Create/resume the AudioContext on a user gesture and start loading clips.
  *  Idempotent — safe to call on every click. */
@@ -114,6 +119,7 @@ function startWalk() {
   const src = ctx.createBufferSource();
   src.buffer = buf;
   src.loop = true;
+  src.playbackRate.value = walkCrouched ? CROUCH_RATE : 1;
   const g = ctx.createGain();
   g.gain.value = VOLUME.walk;
   src.connect(g).connect(master);
@@ -132,8 +138,14 @@ function stopWalk() {
   walkSource = null;
 }
 
-/** Loop the footstep clip while `on`; stop it when `off`. Idempotent. */
-export function setWalking(on: boolean) {
+/** Loop the footstep clip while `on`; stop it when `off`. When `crouched`, the
+ *  loop plays ~50% slower + pitched down. Idempotent; both args update live. */
+export function setWalking(on: boolean, crouched = false) {
+  // Live-update crouch speed/pitch on the running loop.
+  if (crouched !== walkCrouched) {
+    walkCrouched = crouched;
+    if (walkSource) walkSource.playbackRate.value = crouched ? CROUCH_RATE : 1;
+  }
   if (on === walkWanted) return;
   walkWanted = on;
   if (on) startWalk();

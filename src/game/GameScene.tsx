@@ -57,12 +57,14 @@ function CombatTicker() {
   return null;
 }
 
-// Loops the footstep sound while the local player is moving on the ground.
+// Loops the footstep sound while the local player is moving on the ground;
+// crouched → slower + pitched down.
 function Footsteps() {
   useFrame(() => {
     const t = transforms[LOCAL_ID];
     const moving = !!t && t.grounded && Math.hypot(t.forwardSpeed, t.lateralSpeed) > 0.5;
-    setWalking(moving);
+    const crouched = !!t && t.crouchAmount > 0.5;
+    setWalking(moving, crouched);
   });
   return null;
 }

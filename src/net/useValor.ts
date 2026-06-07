@@ -147,7 +147,7 @@ export function usePlayersLive(conn: ValorConnection | null): PlayersLive {
       // aim and crouch are deliberately excluded — those flow through `byId`.
       let sig = "";
       for (const p of arr) {
-        sig += `${p.id}:${p.alive ? 1 : 0}:${p.health}:${p.ammo}:${p.kills}:${p.animState?.tag}:${p.team}:${p.name}|`;
+        sig += `${p.id}:${p.alive ? 1 : 0}:${p.health}:${p.ammo}:${p.kills}:${p.deaths}:${p.ready ? 1 : 0}:${p.animState?.tag}:${p.team}:${p.name}|`;
       }
       if (force || sig !== sigRef.current) {
         sigRef.current = sig;

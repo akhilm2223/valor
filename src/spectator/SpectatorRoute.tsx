@@ -1,14 +1,17 @@
-// SpectatorRoute — picks which spectator view to render based on the URL hash.
+// SpectatorRoute — picks which spectator view to render.
 //
-//   #spectator          → fixed-angle CasterCam (default)
-//   #spectator/freefly  → FreeFly (touch / drag-orbit + pinch-zoom)
+//   #spectator                  → CasterCam (desktop fixed-angle)
+//   #spectator on touch device  → MobileSpectator (phone ghost-cam)
+//   #spectator?mobile=1         → MobileSpectator (desktop QA preview)
+//   #spectator/freefly          → FreeFly (drei OrbitControls)
 //
-// Wired up in src/main.tsx. Both routes are read-only and don't write back to
-// the SpacetimeDB module.
+// Wired up in src/main.tsx. All variants are read-only.
 
 import { useEffect, useState } from "react";
 import { CasterCam } from "./CasterCam";
 import { FreeFly } from "./FreeFly";
+import { MobileSpectator } from "./MobileSpectator";
+import { isTouchDevice } from "./touch";
 
 export function SpectatorRoute() {
   const [hash, setHash] = useState(window.location.hash);
@@ -19,5 +22,9 @@ export function SpectatorRoute() {
   }, []);
 
   if (hash === "#spectator/freefly") return <FreeFly />;
+
+  const forceMobile = new URLSearchParams(window.location.search).has("mobile");
+  if (isTouchDevice() || forceMobile) return <MobileSpectator />;
+
   return <CasterCam />;
 }

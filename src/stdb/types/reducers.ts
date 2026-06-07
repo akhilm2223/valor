@@ -9,10 +9,12 @@ import { type Infer as __Infer } from "spacetimedb";
 import CasterInputReducer from "../caster_input_reducer";
 import FireReducer from "../fire_reducer";
 import JoinReducer from "../join_reducer";
+import StartRoundReducer from "../start_round_reducer";
 import SubmitInputReducer from "../submit_input_reducer";
 
 export type CasterInputParams = __Infer<typeof CasterInputReducer>;
 export type FireParams = __Infer<typeof FireReducer>;
 export type JoinParams = __Infer<typeof JoinReducer>;
+export type StartRoundParams = __Infer<typeof StartRoundReducer>;
 export type SubmitInputParams = __Infer<typeof SubmitInputReducer>;
 

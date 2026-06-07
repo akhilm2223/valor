@@ -23,4 +23,5 @@ export default __t.row({
   get state() {
     return MatchState;
   },
+  roundEndTimestamp: __t.timestamp().name("round_end_timestamp"),
 });

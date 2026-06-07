@@ -37,6 +37,7 @@ import {
 import CasterInputReducer from "./caster_input_reducer";
 import FireReducer from "./fire_reducer";
 import JoinReducer from "./join_reducer";
+import StartRoundReducer from "./start_round_reducer";
 import SubmitInputReducer from "./submit_input_reducer";
 
 // Import all procedure arg schemas
@@ -130,6 +131,7 @@ const reducersSchema = __reducers(
   __reducerSchema("caster_input", CasterInputReducer),
   __reducerSchema("fire", FireReducer),
   __reducerSchema("join", JoinReducer),
+  __reducerSchema("start_round", StartRoundReducer),
   __reducerSchema("submit_input", SubmitInputReducer),
 );
 

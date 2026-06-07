@@ -37,4 +37,5 @@ export default __t.row({
   get animState() {
     return AnimState.name("anim_state");
   },
+  kills: __t.u32(),
 });

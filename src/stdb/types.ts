@@ -53,6 +53,7 @@ export const GameMatch = __t.object("GameMatch", {
   get state() {
     return MatchState;
   },
+  roundEndTimestamp: __t.timestamp(),
 });
 export type GameMatch = __Infer<typeof GameMatch>;
 
@@ -96,6 +97,7 @@ export const Player = __t.object("Player", {
   get animState() {
     return AnimState;
   },
+  kills: __t.u32(),
 });
 export type Player = __Infer<typeof Player>;
 

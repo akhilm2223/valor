@@ -987,22 +987,38 @@ function LobbyPanel({
   const toggle = () => {
     if (conn && localPlayer) conn.reducers.setReady({ ready: !myReady });
   };
+  const switchTeam = (team: number) => {
+    if (conn && localPlayer && localPlayer.team !== team) conn.reducers.setTeam({ team });
+  };
 
-  const Column = ({ label, color, roster }: { label: string; color: string; roster: Player[] }) => (
-    <div style={{ flex: 1, minWidth: 200 }}>
-      <div style={{ color, fontWeight: 800, fontSize: 14, letterSpacing: 1, marginBottom: 8 }}>{label}</div>
-      {roster.length === 0 ? (
-        <div style={{ opacity: 0.45, fontSize: 13, padding: "6px 0" }}>— empty —</div>
-      ) : (
-        roster.map((p) => (
-          <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 10px", marginBottom: 6, borderRadius: 8, background: "rgba(255,255,255,0.06)", border: localPlayer && p.id === localPlayer.id ? `1px solid ${color}` : "1px solid transparent" }}>
-            <span style={{ fontWeight: 600 }}>{decodeName(p.name).name || `P${p.id}`}</span>
-            <span style={{ fontSize: 12, fontWeight: 700, color: p.ready ? "#57e08a" : "#ffb454" }}>{p.ready ? "✓ READY" : "…"}</span>
-          </div>
-        ))
-      )}
-    </div>
-  );
+  const Column = ({ label, color, roster, team }: { label: string; color: string; roster: Player[]; team: number }) => {
+    const mine = localPlayer?.team === team;
+    const full = roster.length >= 2;
+    return (
+      <div style={{ flex: 1, minWidth: 200 }}>
+        <div style={{ color, fontWeight: 800, fontSize: 14, letterSpacing: 1, marginBottom: 8 }}>{label}</div>
+        {roster.length === 0 ? (
+          <div style={{ opacity: 0.45, fontSize: 13, padding: "6px 0" }}>— empty —</div>
+        ) : (
+          roster.map((p) => (
+            <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 10px", marginBottom: 6, borderRadius: 8, background: "rgba(255,255,255,0.06)", border: localPlayer && p.id === localPlayer.id ? `1px solid ${color}` : "1px solid transparent" }}>
+              <span style={{ fontWeight: 600 }}>{decodeName(p.name).name || `P${p.id}`}</span>
+              <span style={{ fontSize: 12, fontWeight: 700, color: p.ready ? "#57e08a" : "#ffb454" }}>{p.ready ? "✓ READY" : "…"}</span>
+            </div>
+          ))
+        )}
+        {!mine && (
+          <button
+            onClick={() => switchTeam(team)}
+            disabled={full}
+            style={{ width: "100%", marginTop: 4, padding: "7px", fontSize: 12, fontWeight: 700, borderRadius: 7, border: `1px solid ${color}`, background: "transparent", color: full ? "rgba(255,255,255,0.35)" : color, cursor: full ? "not-allowed" : "pointer" }}
+          >
+            {full ? "FULL" : "MOVE HERE"}
+          </button>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(8,10,13,0.72)", zIndex: 20 }}>
@@ -1010,8 +1026,8 @@ function LobbyPanel({
         <div style={{ fontSize: 22, fontWeight: 800, marginBottom: 4 }}>Lobby</div>
         <div style={{ opacity: 0.6, fontSize: 13, marginBottom: 18 }}>2v2 · teams auto-balance · skin is set by your team</div>
         <div style={{ display: "flex", gap: 18, marginBottom: 18 }}>
-          <Column label="TEAM A · RANGER" color="#4a90e2" roster={teamA} />
-          <Column label="TEAM B · SCOUT" color="#e25555" roster={teamB} />
+          <Column label="TEAM A · RANGER" color="#4a90e2" roster={teamA} team={0} />
+          <Column label="TEAM B · SCOUT" color="#e25555" roster={teamB} team={1} />
         </div>
         <div style={{ textAlign: "center", fontSize: 13, opacity: 0.8, marginBottom: 14, minHeight: 18 }}>
           {!bothTeams ? "Waiting for an opponent to join…" : allReady ? "All ready — starting!" : "Waiting for everyone to ready up…"}

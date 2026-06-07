@@ -39,6 +39,7 @@ import FireReducer from "./fire_reducer";
 import JoinReducer from "./join_reducer";
 import ResetMatchReducer from "./reset_match_reducer";
 import SetReadyReducer from "./set_ready_reducer";
+import SetTeamReducer from "./set_team_reducer";
 import StartRoundReducer from "./start_round_reducer";
 import SubmitInputReducer from "./submit_input_reducer";
 
@@ -135,6 +136,7 @@ const reducersSchema = __reducers(
   __reducerSchema("join", JoinReducer),
   __reducerSchema("reset_match", ResetMatchReducer),
   __reducerSchema("set_ready", SetReadyReducer),
+  __reducerSchema("set_team", SetTeamReducer),
   __reducerSchema("start_round", StartRoundReducer),
   __reducerSchema("submit_input", SubmitInputReducer),
 );

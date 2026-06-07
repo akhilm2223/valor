@@ -17,12 +17,15 @@ import { Suspense, useEffect, useRef } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Environment, Sky } from "@react-three/drei";
 import { Physics, RigidBody } from "@react-three/rapier";
-import type { Group } from "three";
+import type { DirectionalLight, Group } from "three";
+import { LAYER_OWN_BODY } from "./layers";
 import { Arena } from "../Models";
 import { Scatter } from "../Scatter";
 import { PlayerController } from "./PlayerController";
 import { Weapon } from "./Weapon";
 import { Bots } from "./Bot";
+import { LocalAvatar } from "./LocalAvatar";
+import { ThirdPersonCam } from "./ThirdPersonCam";
 import { Vfx } from "./vfx";
 import { HUD } from "./HUD";
 import { InputController } from "./input";
@@ -110,6 +113,12 @@ function DevHook() {
 }
 
 function Scene() {
+  // The local player's body lives on LAYER_OWN_BODY (hidden from the FPS camera).
+  // Enable that layer on the sun so the body still casts a ground shadow.
+  const sunRef = useRef<DirectionalLight>(null);
+  useEffect(() => {
+    sunRef.current?.layers.enable(LAYER_OWN_BODY);
+  }, []);
   return (
     <>
       {/* Same look as the studio map: sky-blue bg + fog + sun */}
@@ -118,6 +127,7 @@ function Scene() {
       <Sky sunPosition={[60, 18, 40]} turbidity={3} rayleigh={3} mieCoefficient={0.005} mieDirectionalG={0.7} />
       <hemisphereLight args={["#bcd4e6", "#5a4633", 0.9]} />
       <directionalLight
+        ref={sunRef}
         position={[12, 18, 8]}
         intensity={2.2}
         castShadow
@@ -142,6 +152,9 @@ function Scene() {
             was over a hole in the carved map → player fell through. */}
         <PlayerController spawn={[0, -2.5, 6]} />
         <Weapon />
+        {/* The local player's animated third-person body (hidden from the FPS
+            camera via LAYER_OWN_BODY; what other players / the 3rd-person cam see). */}
+        <LocalAvatar />
         <Bots count={3} />
         <Vfx />
         <CombatTicker />
@@ -150,6 +163,8 @@ function Scene() {
 
       <InputController />
       <DevHook />
+      {/* Removable: press V to toggle the third-person camera. */}
+      <ThirdPersonCam />
       <RenderPass />
     </>
   );

@@ -55,6 +55,7 @@ type KinematicCharacterController = ReturnType<
 import { CAPSULE, LOCAL_ID, type Transform, type Vec3 } from "./contracts";
 import { makeEntity, makeTransform, transforms, useControls, useGame } from "./stores";
 import { raycastShot } from "./hitscan";
+import { LAYER_VIEWMODEL } from "./layers";
 
 // ── Tunables (movement research) ────────────────────────────────────────
 const WALK_SPEED = 4.0; // m/s standing
@@ -135,6 +136,9 @@ export function PlayerController({ spawn = [0, 1.2, 6] as Vec3 }: { spawn?: Vec3
     // s is the capsule CENTER; place the camera at center + standing eye.
     camera.position.set(s[0], s[1] + (CAPSULE.standEye - CAPSULE.standHalfHeight - CAPSULE.radius), s[2]);
     camera.rotation.order = "YXZ";
+    // FPS camera renders WORLD + VIEWMODEL (never the player's own body, which is
+    // on LAYER_OWN_BODY). Permanent/MP-safe: holds even if ThirdPersonCam is removed.
+    camera.layers.enable(LAYER_VIEWMODEL);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

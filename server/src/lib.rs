@@ -326,10 +326,16 @@ pub fn submit_input(
         AnimState::Idle
     };
 
+    // Reload refills the mag. The client times the reload (plays the animation,
+    // locks out firing) and sends reload=true once it completes — including the
+    // AUTO-reload it kicks off when the mag hits empty. Server just refills.
+    let new_ammo = if reload && p.ammo < MAG_SIZE { MAG_SIZE } else { p.ammo };
+
     ctx.db.players().id().update(Player {
         aim_vector: aim,
         lean,
         crouch,
+        ammo: new_ammo,
         anim_state: next_state,
         ..p
     });

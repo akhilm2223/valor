@@ -205,14 +205,17 @@ function RemotePlayerRig({
   localTeam,
   arenaRef,
   byId,
+  lockedRef,
 }: {
   player: Player;
   localTeam?: number;
   arenaRef: React.RefObject<Group | null>;
   byId: React.MutableRefObject<Map<number, Player>>;
+  lockedRef: React.MutableRefObject<number | null>;
 }) {
   const ringColor = player.team === 0 ? "#4a90e2" : "#e25555";
   const sameTeam = localTeam !== undefined && player.team === localTeam;
+  const outlineRef = useRef<Group>(null);
 
   // Ground-snap the body to the terrain, like the camera. The server keeps every
   // player at y=0 (no gravity) on a bumpy floor, so rendering at raw y=0 leaves
@@ -267,6 +270,9 @@ function RemotePlayerRig({
     while (d < -Math.PI) d += Math.PI * 2;
     yawRef.current += d * (1 - Math.exp(-14 * Math.min(dt, 0.05)));
     g.rotation.set(0, yawRef.current, 0);
+    // Faint target outline: visible ONLY while aim-assist is snapping onto this
+    // enemy. No label — just a quiet halo so you can tell it's marked.
+    if (outlineRef.current) outlineRef.current.visible = lockedRef.current === player.id;
   });
   return (
     <group ref={groupRef}>
@@ -289,6 +295,14 @@ function RemotePlayerRig({
           opacity={0.85}
         />
       </mesh>
+      {/* Aim-assist target halo — quiet amber ring above the head, toggled in
+          useFrame. Additive + no depth write so it reads as a soft marker. */}
+      <group ref={outlineRef} visible={false}>
+        <mesh position={[0, 2.15, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+          <ringGeometry args={[0.28, 0.4, 24]} />
+          <meshBasicMaterial color="#ffce78" transparent opacity={0.85} depthWrite={false} toneMapped={false} />
+        </mesh>
+      </group>
     </group>
   );
 }
@@ -408,9 +422,9 @@ function pickAssistAim(
   players: Iterable<Player>,
   fx: number,
   fz: number,
-): { x: number; y: number; z: number } | null {
+): { x: number; y: number; z: number; id: number } | null {
   const headY = me.position.y + HEAD_OFFSET_Y;
-  let best: { x: number; y: number; z: number } | null = null;
+  let best: { x: number; y: number; z: number; id: number } | null = null;
   let bestCos = ASSIST_COS;
   for (const p of players) {
     if (p.id === me.id || p.team === me.team || !p.alive) continue;
@@ -426,7 +440,7 @@ function pickAssistAim(
     const cos = (fx * dx + fz * dz) / flat;
     if (cos > bestCos) {
       bestCos = cos;
-      best = { x: dx * inv, y: dy * inv, z: dz * inv };
+      best = { x: dx * inv, y: dy * inv, z: dz * inv, id: p.id };
     }
   }
   return best;
@@ -444,6 +458,7 @@ const RECOIL_RECOVER = 14; // damp rate back to neutral
 // client prediction integrates identically and reconciliation barely corrects.
 const MOVE_SPEED = 3.6;
 const CROUCH_SPEED = 1.6;
+const RELOAD_SEC = 1.1; // auto-reload time when the mag empties
 // Gun-barrel offset in the camera's local frame (right, down, forward=-Z) — the
 // muzzle/tracer origin so the streak leaves the held gun, not your eye.
 const MUZZLE_LOCAL = new Vector3(0.18, -0.16, -0.62);
@@ -455,12 +470,14 @@ interface VisionInputBridgeProps {
   // Live player map (read every frame for fresh positions, no re-render churn).
   byId: React.MutableRefObject<Map<number, Player>>;
   arenaRef: React.RefObject<Group | null>;
-  // Called (only on change) when aim-assist acquires/loses a target, so the HUD
-  // crosshair can show the player WHERE the gun will actually shoot.
+  // Subtle crosshair tint when aim-assist has a target (no "LOCKED" text).
   onLockChange?: (locked: boolean) => void;
+  // Live: the enemy id aim-assist is currently snapping onto (or null). Rigs read
+  // this to draw a faint outline on the targeted enemy — no on-screen label.
+  lockedRef: React.MutableRefObject<number | null>;
 }
 
-function VisionInputBridge({ driver, localPlayer, byId, arenaRef, onLockChange }: VisionInputBridgeProps) {
+function VisionInputBridge({ driver, localPlayer, byId, arenaRef, onLockChange, lockedRef }: VisionInputBridgeProps) {
   const lockedPrev = useRef(false);
   const camera = useThree((s) => s.camera);
   const rc = useRef(new Raycaster());
@@ -472,6 +489,10 @@ function VisionInputBridge({ driver, localPlayer, byId, arenaRef, onLockChange }
   const recoilPitch = useRef(0);
   // Scratch vector for computing the muzzle world position each shot.
   const muzzlePos = useRef(new Vector3());
+  // Auto-reload state: seconds left in the current reload; whether we've already
+  // sent the refill for this empty mag (so we send reload=true exactly once).
+  const reloadTimer = useRef(0);
+  const reloadSent = useRef(false);
   // Have we oriented the camera for the current life yet? (reset on death.)
   const yawInit = useRef(false);
   // Smoothed feet position. Server position lands at 30Hz; we render at 60+Hz,
@@ -530,9 +551,10 @@ function VisionInputBridge({ driver, localPlayer, byId, arenaRef, onLockChange }
 
     // ── Aim → camera-forward, bent onto the nearest enemy by aim assist ────
     const assist = pickAssistAim(lp, byId.current.values(), fx, fz);
-    const aim = assist ?? { x: fx, y: 0, z: fz };
-    // Surface lock state to the HUD (only on change — cheap). `assist` non-null
-    // means an enemy is in the cone and the shot WILL bend onto them.
+    const aim = assist ? { x: assist.x, y: assist.y, z: assist.z } : { x: fx, y: 0, z: fz };
+    // Record the targeted enemy id (live, for the faint enemy outline) and a
+    // subtle crosshair tint — no "LOCKED" banner, the aim-assist stays quiet.
+    lockedRef.current = assist ? assist.id : null;
     const locked = assist !== null;
     if (locked !== lockedPrev.current) {
       lockedPrev.current = locked;
@@ -565,10 +587,27 @@ function VisionInputBridge({ driver, localPlayer, byId, arenaRef, onLockChange }
         [mz.x + aim.x * TRACER_RANGE, mz.y + aim.y * TRACER_RANGE, mz.z + aim.z * TRACER_RANGE],
       );
     }
+    // ── Auto-reload — when the mag hits empty, rack a fresh one automatically
+    // after a short reload time (you don't have to do anything). The client times
+    // it (plays the rack SFX, then sends reload=true once); the server refills.
+    // Manual reload (R) still works via `reload` above.
+    let autoReload = false;
+    if (lp.alive && lp.ammo === 0 && reloadTimer.current <= 0 && !reloadSent.current) {
+      reloadTimer.current = RELOAD_SEC; // start the reload
+      playSfx("reload");
+    }
+    if (reloadTimer.current > 0) {
+      reloadTimer.current -= dtRaw;
+      if (reloadTimer.current <= 0) {
+        autoReload = true; // fire the refill this frame
+        reloadSent.current = true;
+      }
+    }
+    if (lp.ammo > 0) reloadSent.current = false; // mag refilled → arm for next time
     if (reload) playSfx("reload");
 
     driver.updateInput(
-      { aim, lean: { x: lx, z: lz }, crouch: ctrl.crouch, firePressed, reload },
+      { aim, lean: { x: lx, z: lz }, crouch: ctrl.crouch, firePressed, reload: reload || autoReload },
       lp,
     );
 
@@ -654,7 +693,9 @@ function VisionInputBridge({ driver, localPlayer, byId, arenaRef, onLockChange }
 // it turns RED with a lock bracket + label, telling you the shot will bend onto
 // them — that's the "auto-aim" made visible.
 function Crosshair({ locked = false }: { locked?: boolean }) {
-  const color = locked ? "#ff3b3b" : "rgba(255,255,255,0.95)";
+  // Subtle only: a faint warm tint when aim-assist has a target. No "LOCKED"
+  // label, no bracket — the enemy gets a quiet outline instead (TargetOutline).
+  const color = locked ? "rgba(255,206,120,0.95)" : "rgba(255,255,255,0.92)";
   const shadow = "0 0 0 1px rgba(0,0,0,0.65)";
   const tick = (s: React.CSSProperties) => (
     <div style={{ position: "absolute", top: "50%", left: "50%", background: color, boxShadow: shadow, ...s }} />
@@ -666,14 +707,6 @@ function Crosshair({ locked = false }: { locked?: boolean }) {
       {tick({ width: 2, height: 9, marginLeft: -1, marginTop: 8 })}
       {tick({ width: 9, height: 2, marginLeft: -17, marginTop: -1 })}
       {tick({ width: 9, height: 2, marginLeft: 8, marginTop: -1 })}
-      {locked && (
-        <>
-          <div style={{ position: "absolute", top: "50%", left: "50%", width: 32, height: 32, marginLeft: -16, marginTop: -16, border: `2px solid ${color}`, borderRadius: 5, boxShadow: shadow }} />
-          <div style={{ position: "absolute", top: "100%", left: "50%", transform: "translateX(-50%)", marginTop: 6, color, fontSize: 10, fontWeight: 800, letterSpacing: 1, textShadow: "0 1px 2px rgba(0,0,0,0.8)", whiteSpace: "nowrap" }}>
-            ● LOCKED
-          </div>
-        </>
-      )}
     </div>
   );
 }
@@ -1016,6 +1049,9 @@ export function MultiplayerGame() {
   // Crosshair lock state — set by VisionInputBridge when aim-assist acquires an
   // enemy (only flips on change, so this re-render is rare).
   const [aimLocked, setAimLocked] = useState(false);
+  // Live id of the enemy aim-assist is snapping onto — read by remote rigs each
+  // frame to show the faint target halo (no React churn).
+  const lockedRef = useRef<number | null>(null);
 
   // Combat reactions from the server's shot stream. For every NEW shot row we
   //   • play gunfire (enemy shots only — our own already cracked on the local
@@ -1204,7 +1240,7 @@ export function MultiplayerGame() {
           ) : null}
           {remotePlayers.map((p) => (
             <AssetBoundary key={p.id}>
-              <RemotePlayerRig player={p} localTeam={localPlayer?.team} arenaRef={arenaRef} byId={byId} />
+              <RemotePlayerRig player={p} localTeam={localPlayer?.team} arenaRef={arenaRef} byId={byId} lockedRef={lockedRef} />
             </AssetBoundary>
           ))}
           {/* First-person arms + gun (same rig single-player uses), shown only
@@ -1224,7 +1260,7 @@ export function MultiplayerGame() {
         <CamRig localPlayer={localPlayer} />
         {joined ? (
           <>
-            <VisionInputBridge driver={driver} localPlayer={localPlayer} byId={byId} arenaRef={arenaRef} onLockChange={setAimLocked} />
+            <VisionInputBridge driver={driver} localPlayer={localPlayer} byId={byId} arenaRef={arenaRef} onLockChange={setAimLocked} lockedRef={lockedRef} />
             {/* Keyboard/mouse fallback — writes the SAME useControls store the
                 webcam does, so testing without a camera still works. */}
             <InputController />

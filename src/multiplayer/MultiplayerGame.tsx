@@ -28,6 +28,7 @@ import { Arena, FitModel } from "../Models";
 import { Scatter } from "../Scatter";
 import { Gun } from "../Gun";
 import { useSpectatorCam, SpectatorOverlay } from "../game/SpectatorCam";
+import { QrJoinBadge } from "../spectator/QrJoinBadge";
 import { FpvArms } from "../game/FpvArms";
 import { VisionController } from "../game/VisionController";
 import { InputController } from "../game/input";
@@ -820,6 +821,13 @@ export function MultiplayerGame() {
       {joined ? <VisionController /> : null}
 
       {!joined ? <JoinForm onSubmit={onJoinSubmit} status={status} error={error} /> : null}
+
+      {/* QR badge — bottom-right corner, above the back-to-studio link.
+          Anyone with a phone can scan to spectate the running match. */}
+      <QrJoinBadge
+        style={{ position: "absolute", bottom: 56, right: 14, zIndex: 4 }}
+        size={88}
+      />
 
       <a
         href="#"

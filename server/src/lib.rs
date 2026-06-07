@@ -544,6 +544,34 @@ pub fn caster_input(ctx: &ReducerContext, kind: CommentaryKind, text: String) {
     });
 }
 
+// =============================================================================
+// Spectators — anonymous read-only viewers. Idempotent join, explicit leave.
+// Mobile spectator clients (`#spectator` on touch devices) call spectator_join
+// on mount and spectator_leave on unmount. The disconnect hook is a safety net
+// for tab-close cases where the leave reducer never fires.
+//
+// Invisibility invariant: the Spectator row carries only `identity` +
+// `joined_at` — no position/aim/team. Player clients render from `players`
+// only, so spectators never appear in any player's view.
+// =============================================================================
+
+#[spacetimedb::reducer]
+pub fn spectator_join(ctx: &ReducerContext) {
+    let me = ctx.sender();
+    if ctx.db.spectators().identity().find(me).is_some() {
+        return;
+    }
+    ctx.db.spectators().insert(Spectator {
+        identity: me,
+        joined_at: ctx.timestamp,
+    });
+}
+
+#[spacetimedb::reducer]
+pub fn spectator_leave(ctx: &ReducerContext) {
+    ctx.db.spectators().identity().delete(ctx.sender());
+}
+
 #[spacetimedb::reducer(client_connected)]
 pub fn on_connect(_ctx: &ReducerContext) {}
 
@@ -556,6 +584,7 @@ pub fn on_disconnect(ctx: &ReducerContext) {
             ..p
         });
     }
+    ctx.db.spectators().identity().delete(me);
 }
 
 // =============================================================================

@@ -2,11 +2,27 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>MOSH</title>
     <style>
-      html, body, #root { margin: 0; height: 100%; background: #0a0a0a; overflow: hidden; }
+      html, body, #root {
+        margin: 0;
+        height: 100%;
+        background: #0a0a0a;
+        overflow: hidden;
+        /* Prevent pull-to-refresh and rubber-band scroll on iOS/Android. */
+        overscroll-behavior: none;
+        /* iOS double-tap-to-zoom + text selection on long-press. */
+        -webkit-user-select: none;
+        user-select: none;
+        -webkit-touch-callout: none;
+        /* Honor the safe-area inset on notched phones. */
+        padding-env: safe-area-inset;
+      }
     </style>
   </head>
   <body>

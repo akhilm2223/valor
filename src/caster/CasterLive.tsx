@@ -16,6 +16,7 @@
 //     color.
 
 import { useEffect, useRef, useState } from "react";
+import { QrJoinBadge } from "../spectator/QrJoinBadge";
 import { pickBark, renderBark } from "./Barks";
 import {
   createLiveKillStream,
@@ -209,8 +210,16 @@ export function CasterLive() {
         fontFamily: "system-ui, sans-serif",
         padding: 24,
         boxSizing: "border-box",
+        position: "relative",
       }}
     >
+      {/* QR badge — fixed top-right so the caster screen shows a 'scan to
+          spectate' code on the broadcast. */}
+      <QrJoinBadge
+        style={{ position: "fixed", top: 18, right: 18, zIndex: 10 }}
+        size={104}
+      />
+
       <div style={{ maxWidth: 760, margin: "0 auto" }}>
         <header style={{ marginBottom: 20 }}>
           <h1 style={{ margin: 0, fontSize: 26, letterSpacing: 0.5 }}>

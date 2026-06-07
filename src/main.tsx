@@ -7,6 +7,7 @@ import { CasterDemo } from "./caster/CasterDemo";
 import { CasterLive } from "./caster/CasterLive";
 import { Leaderboard } from "./ui/Leaderboard";
 import { SpectatorRoute } from "./spectator/SpectatorRoute";
+import { JoinWall } from "./spectator/JoinWall";
 import { MultiplayerGame } from "./multiplayer/MultiplayerGame";
 import { Lobby } from "./lobby/Lobby";
 
@@ -21,6 +22,7 @@ import { Lobby } from "./lobby/Lobby";
 //   /#multiplayer                  → Phase 5 networked multiplayer (server-authoritative)
 //   /#spectator                    → Phase 4 fixed-angle spectator camera (read-only)
 //   /#spectator/freefly            → Phase 4 spectator with touch orbit + pinch zoom
+//   /#join                         → Full-screen QR wall for projecting "scan to spectate"
 function Root() {
   // Track the hash so Akhil's #game link still works without a full reload.
   const [hash, setHash] = useState(window.location.hash);
@@ -38,6 +40,7 @@ function Root() {
   if (hash === "#leaderboard") return <Leaderboard />;
   if (hash === "#multiplayer") return <MultiplayerGame />;
   if (hash === "#spectator" || hash === "#spectator/freefly") return <SpectatorRoute />;
+  if (hash === "#join") return <JoinWall />;
   if (hash === "#studio") return <App />;
   return <Lobby />;
 }

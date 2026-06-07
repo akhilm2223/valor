@@ -83,7 +83,7 @@ function PlayerMarker({ player }: { player: Player }) {
   );
 }
 
-function SpectatorScene({ players }: { players: Player[] }) {
+export function SpectatorScene({ players }: { players: Player[] }) {
   const arena = useRef<Group>(null!);
   useEffect(() => {
     arena.current?.traverse((o) => {

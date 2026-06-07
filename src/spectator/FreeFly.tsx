@@ -12,15 +12,7 @@
 import { useMemo } from "react";
 import { OrbitControls } from "@react-three/drei";
 import { CasterCam } from "./CasterCam";
-
-// Heuristic for "is this a touch device" so the footer hint reads right.
-function isTouchDevice(): boolean {
-  if (typeof window === "undefined") return false;
-  return (
-    "ontouchstart" in window ||
-    (typeof navigator !== "undefined" && navigator.maxTouchPoints > 0)
-  );
-}
+import { isTouchDevice } from "./touch";
 
 export function FreeFly() {
   const touch = useMemo(() => isTouchDevice(), []);

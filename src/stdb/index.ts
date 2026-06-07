@@ -37,6 +37,8 @@ import {
 import CasterInputReducer from "./caster_input_reducer";
 import FireReducer from "./fire_reducer";
 import JoinReducer from "./join_reducer";
+import SpectatorJoinReducer from "./spectator_join_reducer";
+import SpectatorLeaveReducer from "./spectator_leave_reducer";
 import StartRoundReducer from "./start_round_reducer";
 import SubmitInputReducer from "./submit_input_reducer";
 
@@ -131,6 +133,8 @@ const reducersSchema = __reducers(
   __reducerSchema("caster_input", CasterInputReducer),
   __reducerSchema("fire", FireReducer),
   __reducerSchema("join", JoinReducer),
+  __reducerSchema("spectator_join", SpectatorJoinReducer),
+  __reducerSchema("spectator_leave", SpectatorLeaveReducer),
   __reducerSchema("start_round", StartRoundReducer),
   __reducerSchema("submit_input", SubmitInputReducer),
 );

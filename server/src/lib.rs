@@ -549,12 +549,16 @@ pub fn on_connect(_ctx: &ReducerContext) {}
 
 #[spacetimedb::reducer(client_disconnected)]
 pub fn on_disconnect(ctx: &ReducerContext) {
+    // REMOVE the row, don't just mark it dead. Web clients usually reconnect
+    // with a fresh Identity after a refresh, so `join` inserts a NEW row and the
+    // old one would linger forever as a dead body — the client renders every
+    // remote player regardless of `alive`, so those ghosts stack at the spawn
+    // point and a clean 1v1 looks like "1v2" with everyone piled in one place.
+    // Deleting keeps the players table to exactly who is currently connected, so
+    // team auto-balance and rendering both stay honest.
     let me = ctx.sender();
     if let Some(p) = ctx.db.players().identity().find(me) {
-        ctx.db.players().id().update(Player {
-            alive: false,
-            ..p
-        });
+        ctx.db.players().id().delete(p.id);
     }
 }
 

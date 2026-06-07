@@ -24,6 +24,7 @@
 import { Component, type ReactNode, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Sky } from "@react-three/drei";
+import { Raycaster, Vector3, type Group } from "three";
 import { Arena, FitModel } from "../Models";
 import { Scatter } from "../Scatter";
 import { Gun } from "../Gun";
@@ -174,13 +175,47 @@ function fanOffset(id: number): [number, number] {
 // up rendered inside your face. We fan TEAMMATES out by a cosmetic offset (you
 // can't shoot them, so visual-only is fine). OPPONENTS render at their true
 // server position so aim + hit registration stay honest.
-function RemotePlayerRig({ player, localTeam }: { player: Player; localTeam?: number }) {
-  const yaw = Math.atan2(player.aimVector.x, player.aimVector.z) + Math.PI;
+function RemotePlayerRig({
+  player,
+  localTeam,
+  arenaRef,
+}: {
+  player: Player;
+  localTeam?: number;
+  arenaRef: React.RefObject<Group | null>;
+}) {
   const ringColor = player.team === 0 ? "#4a90e2" : "#e25555";
   const sameTeam = localTeam !== undefined && player.team === localTeam;
-  const [ox, oz] = sameTeam ? fanOffset(player.id) : [0, 0];
+
+  // Ground-snap the body to the terrain, like the camera. The server keeps every
+  // player at y=0 (no gravity) on a bumpy floor, so rendering at raw y=0 leaves
+  // opponents floating in the air. Raycast the arena under them (throttled) and
+  // stand them on the floor. Position + facing are written in useFrame so they
+  // track the 30Hz server updates smoothly.
+  const groupRef = useRef<Group>(null);
+  const rc = useRef(new Raycaster());
+  const scratch = useRef(new Vector3());
+  const frame = useRef(0);
+  const groundYRef = useRef(player.position.y);
+  useFrame(() => {
+    const g = groupRef.current;
+    if (!g) return;
+    const [ox, oz] = sameTeam ? fanOffset(player.id) : [0, 0];
+    const px = player.position.x + ox;
+    const pz = player.position.z + oz;
+    const arena = arenaRef.current;
+    if (arena && frame.current++ % 12 === 0) {
+      rc.current.set(scratch.current.set(px, 200, pz), DOWN);
+      const hits = rc.current.intersectObject(arena, true);
+      for (const h of hits) {
+        if (h.point.y > -60 && h.point.y < 150) { groundYRef.current = h.point.y; break; }
+      }
+    }
+    g.position.set(px, groundYRef.current, pz);
+    g.rotation.set(0, Math.atan2(player.aimVector.x, player.aimVector.z) + Math.PI, 0);
+  });
   return (
-    <group position={[player.position.x + ox, player.position.y, player.position.z + oz]} rotation={[0, yaw, 0]}>
+    <group ref={groupRef}>
       <FitModel
         url={decodeName(player.name).modelUrl}
         height={1.8}
@@ -207,6 +242,18 @@ function RemotePlayerRig({ player, localTeam }: { player: Player; localTeam?: nu
 // Mounts useSpectatorCam inside the Canvas (the hook needs useFrame/useThree).
 function CamRig({ localPlayer }: { localPlayer: Player | undefined }) {
   useSpectatorCam(localPlayer);
+  return null;
+}
+
+// Explicit render pass — REQUIRED. FpvArms runs a positive-priority useFrame
+// (priority 11, to track the camera after recoil), and the instant any useFrame
+// has a positive priority R3F disables its automatic render and expects us to
+// render manually. Without this, the canvas renders fine until you spawn alive
+// (which mounts FpvArms) and then goes BLACK. We render last (priority 1000),
+// after the camera write (VisionInputBridge, priority 0) and the arms (11).
+// Mirrors GameScene.tsx's RenderPass.
+function RenderPass() {
+  useFrame(({ gl, scene, camera }) => gl.render(scene, camera), 1000);
   return null;
 }
 
@@ -263,6 +310,7 @@ const HEAD_OFFSET_Y = 1.35; // server shooter ray origin (server/src/lib.rs)
 const CENTER_OFFSET_Y = 0.9; // server victim center = position.y + PLAYER_HEIGHT*0.5
 const ASSIST_RANGE = 60; // m — matches server MAX_RANGE
 const ASSIST_COS = Math.cos((25 * Math.PI) / 180); // generous cone (body-aim is coarse)
+const DOWN = new Vector3(0, -1, 0); // ground-snap raycast direction
 
 /** Wrap an angle into (-π, π] so accumulated yaw never drifts unbounded. */
 function wrapAngle(a: number): number {
@@ -309,10 +357,15 @@ interface VisionInputBridgeProps {
   driver: ValorDriver | null;
   localPlayer: Player | undefined;
   players: Player[];
+  arenaRef: React.RefObject<Group | null>;
 }
 
-function VisionInputBridge({ driver, localPlayer, players }: VisionInputBridgeProps) {
+function VisionInputBridge({ driver, localPlayer, players, arenaRef }: VisionInputBridgeProps) {
   const camera = useThree((s) => s.camera);
+  const rc = useRef(new Raycaster());
+  const rayOrigin = useRef(new Vector3());
+  const groundY = useRef(0);
+  const rcFrame = useRef(0);
   const yaw = useRef(0);
   // Have we oriented the camera for the current life yet? (reset on death.)
   const yawInit = useRef(false);
@@ -396,21 +449,27 @@ function VisionInputBridge({ driver, localPlayer, players }: VisionInputBridgePr
         smooth.current.z += (p.z - smooth.current.z) * alpha;
       }
       const eye = ctrl.crouch ? CAPSULE.crouchEye : CAPSULE.standEye;
-      camera.position.set(smooth.current.x, smooth.current.y + eye, smooth.current.z);
+      // Ground-snap: the server keeps every player at y=0 with NO gravity, but
+      // the arena terrain swings from −5 to +2, so y=0 buries/floats the camera
+      // and you see only the sky-coloured background ("all white"). Raycast the
+      // floor under us (throttled — the terrain is a heavy un-indexed trimesh)
+      // and sit the camera at floor + eye, the way single-player's physics does.
+      // Raycast ONLY the arena — NOT the whole scene. The scene also contains the
+      // FPV arms (glued to the camera) and other player rigs; hitting those made
+      // groundY chase the camera and launched it into the sky (blank screen).
+      const arena = arenaRef.current;
+      if (arena && rcFrame.current++ % 10 === 0) {
+        rc.current.set(rayOrigin.current.set(smooth.current.x, 200, smooth.current.z), DOWN);
+        const hits = rc.current.intersectObject(arena, true);
+        for (const h of hits) {
+          if (h.point.y > -60 && h.point.y < 150) { groundY.current = h.point.y; break; }
+        }
+      }
+      camera.position.set(smooth.current.x, groundY.current + eye, smooth.current.z);
       camera.rotation.set(0, yaw.current, 0, "YXZ");
     } else {
       smooth.current = null; // reset so respawn snaps cleanly
     }
-
-    // TEMP DEBUG (remove): expose live camera + player numbers for diagnosis.
-    (window as unknown as Record<string, unknown>).__dbg = {
-      cam: [+camera.position.x.toFixed(1), +camera.position.y.toFixed(1), +camera.position.z.toFixed(1)],
-      rotY: +camera.rotation.y.toFixed(2),
-      ppos: [+localPlayer.position.x.toFixed(1), +localPlayer.position.y.toFixed(1), +localPlayer.position.z.toFixed(1)],
-      alive: localPlayer.alive,
-      team: localPlayer.team,
-      aim: [+localPlayer.aimVector.x.toFixed(2), +localPlayer.aimVector.z.toFixed(2)],
-    };
   });
 
   return null;
@@ -664,10 +723,21 @@ export function MultiplayerGame() {
     return map;
   }, [players]);
 
+  // Other players to render: not us, and ALIVE only. The server never deletes a
+  // disconnected player (it just sets alive=false), so without this filter every
+  // stale test session lingers as a body — that's the phantom "1v2 / everyone
+  // stacked in one spot" the scene was showing.
   const remotePlayers = useMemo(
-    () => (identity ? players.filter((p) => !p.identity.isEqual(identity)) : players),
+    () =>
+      players.filter(
+        (p) => p.alive && (identity ? !p.identity.isEqual(identity) : true),
+      ),
     [players, identity],
   );
+
+  // The arena geometry, isolated in a ref'd group so the camera ground-snap
+  // raycast can hit ONLY the terrain (never the FPV arms or player rigs).
+  const arenaRef = useRef<Group>(null);
 
   // Driver lifecycle. Spawn one as soon as the connection is ready; tear it
   // down on unmount or when the connection flips.
@@ -765,14 +835,17 @@ export function MultiplayerGame() {
             HDR environment, capped DPR — to avoid exhausting integrated GPUs
             (which caused the "Context Lost" black screen on Edge). */}
         <ContextRecovery />
+        <RenderPass />
         <color attach="background" args={["#bcd4e6"]} />
         <fog attach="fog" args={["#bcd4e6", 60, 220]} />
         <Sky sunPosition={[60, 18, 40]} turbidity={3} rayleigh={3} mieCoefficient={0.005} mieDirectionalG={0.7} />
         <hemisphereLight args={["#bcd4e6", "#5a4633", 0.9]} />
         <directionalLight position={[60, 18, 40]} intensity={2.2} />
         <Suspense fallback={null}>
-          <Arena />
-          <Scatter />
+          <group ref={arenaRef}>
+            <Arena />
+            <Scatter />
+          </group>
           {/* First-person: hide our own body while alive (camera sits at the
               eye). Render it when dead so the spectator orbit sees the corpse. */}
           {joined && localPlayer && !localPlayer.alive ? (
@@ -782,7 +855,7 @@ export function MultiplayerGame() {
           ) : null}
           {remotePlayers.map((p) => (
             <AssetBoundary key={p.id}>
-              <RemotePlayerRig player={p} localTeam={localPlayer?.team} />
+              <RemotePlayerRig player={p} localTeam={localPlayer?.team} arenaRef={arenaRef} />
             </AssetBoundary>
           ))}
           {/* First-person arms + gun (same rig single-player uses), shown only
@@ -798,7 +871,7 @@ export function MultiplayerGame() {
         <CamRig localPlayer={localPlayer} />
         {joined ? (
           <>
-            <VisionInputBridge driver={driver} localPlayer={localPlayer} players={players} />
+            <VisionInputBridge driver={driver} localPlayer={localPlayer} players={players} arenaRef={arenaRef} />
             {/* Keyboard/mouse fallback — writes the SAME useControls store the
                 webcam does, so testing without a camera still works. */}
             <InputController />

@@ -38,9 +38,14 @@ import { useFrame } from "@react-three/fiber";
 import { Group } from "three";
 import { Gun } from "../Gun";
 import { AnimatedCharacter } from "./AnimatedCharacter";
-import { CAPSULE, resolveAnimState, type Vec3 } from "./contracts";
+import { CAPSULE, LOCAL_ID, resolveAnimState, type Vec3 } from "./contracts";
 import { makeEntity, transforms, useGame } from "./stores";
 import { raycastShot } from "./hitscan";
+import { setEntityWalk } from "./sfx";
+
+// Beyond this distance (m) a bot's footsteps are inaudible; volume falls off
+// linearly from full at 0 to zero here.
+const BOT_WALK_MAX_DIST = 30;
 
 // Measured plaza floor (feet Y) of arena_opt.glb near the player spawn — the
 // player capsule settles with feet at ~-3.76. Bots are placed on this same
@@ -204,10 +209,27 @@ function BotActor({ spec }: { spec: BotSpec }) {
     group.position.set(t.pos[0], t.pos[1] - CENTER_OFFSET, t.pos[2]);
     group.rotation.y = t.yaw;
 
+    // Footsteps: loop while this bot is walking, with volume that decreases
+    // LINEARLY with distance to the player (silent past BOT_WALK_MAX_DIST).
+    const speed = Math.hypot(t.forwardSpeed, t.lateralSpeed);
+    const lp = transforms[LOCAL_ID]?.pos;
+    let walkGain = 0;
+    if (e.alive && speed > 0.5 && lp) {
+      const dx = t.pos[0] - lp[0];
+      const dy = t.pos[1] - lp[1];
+      const dz = t.pos[2] - lp[2];
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      walkGain = Math.max(0, 1 - dist / BOT_WALK_MAX_DIST);
+    }
+    setEntityWalk(spec.id, walkGain > 0.001, walkGain);
+
     // Resolve the clip; only re-render when it actually changes.
     const next = resolveAnimState(e, t);
     if (next !== animState) setAnimState(next);
   });
+
+  // Stop this bot's footstep voice when it unmounts.
+  useEffect(() => () => setEntityWalk(spec.id, false, 0), [spec.id]);
 
   return (
     <group ref={groupRef}>

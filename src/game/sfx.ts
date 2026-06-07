@@ -151,3 +151,41 @@ export function setWalking(on: boolean, crouched = false) {
   if (on) startWalk();
   else stopWalk();
 }
+
+// ── Per-entity (bot) footsteps, distance-attenuated by the caller ──────────
+// Each bot gets its own looping footstep voice whose gain the caller updates
+// every frame (it passes a 0..1 factor that falls off linearly with distance to
+// the player). Loops are desynced by a random start offset so a "bunch of bots"
+// doesn't stomp in lockstep.
+const entityWalk: Record<string, { src: AudioBufferSourceNode; gain: GainNode }> = {};
+
+/** Loop entity `id`'s footsteps at `volume` (0..1, already distance-scaled), or
+ *  stop them when `on` is false. Gain updates live on each call. */
+export function setEntityWalk(id: string, on: boolean, volume: number) {
+  if (!ctx || !master) return;
+  const cur = entityWalk[id];
+  if (on) {
+    if (cur) {
+      cur.gain.gain.value = volume * VOLUME.walk;
+      return;
+    }
+    const buf = buffers.walk;
+    if (!buf) return;
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.loop = true;
+    const g = ctx.createGain();
+    g.gain.value = volume * VOLUME.walk;
+    src.connect(g).connect(master);
+    src.start(0, Math.random() * buf.duration); // desync from other bots
+    entityWalk[id] = { src, gain: g };
+  } else if (cur) {
+    try {
+      cur.src.stop();
+    } catch {
+      // already stopped
+    }
+    cur.src.disconnect();
+    delete entityWalk[id];
+  }
+}

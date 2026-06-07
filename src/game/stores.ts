@@ -37,6 +37,7 @@ const initialControls: Controls = {
   strafeLeft: false,
   strafeRight: false,
   crouch: false,
+  aiming: false,
   firePressed: false,
   reloadPressed: false,
   tracked: true,

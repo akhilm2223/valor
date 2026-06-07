@@ -28,9 +28,12 @@ import { HUD } from "./HUD";
 import { InputController } from "./input";
 import { registerWorld, clearWorld, raycastShot } from "./hitscan";
 import { tickCombat, combat } from "./combat";
-import { useGame, transforms } from "./stores";
+import { useGame, useControls, transforms } from "./stores";
 import { LOCAL_ID } from "./contracts";
 import { VisionController } from "./VisionController";
+import { initAudio, setWalking } from "./sfx";
+import { TargetLock } from "./TargetLock";
+import { updateLock, getLock } from "./aimAssist";
 
 // Static world: trimesh collider around the carved arena, also registered with
 // the hitscan BVH for bullet-vs-world tests. Registration runs after the GLB has
@@ -49,6 +52,34 @@ function World() {
       <Scatter />
     </RigidBody>
   );
+}
+
+// Bulletproof audio unlock: browsers gate audio behind a user gesture. Unlock on
+// the FIRST pointer/keypress ANYWHERE (vision mode has no pointer-lock click), so
+// the first interaction can't be missed. initAudio() is idempotent.
+function AudioUnlock() {
+  useEffect(() => {
+    const unlock = () => initAudio();
+    window.addEventListener("pointerdown", unlock);
+    window.addEventListener("keydown", unlock);
+    return () => {
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("keydown", unlock);
+    };
+  }, []);
+  return null;
+}
+
+// Loops the footstep sound while the local player walks on the ground (crouched
+// → slower + pitched down).
+function Footsteps() {
+  useFrame(() => {
+    const t = transforms[LOCAL_ID];
+    const moving = !!t && t.grounded && Math.hypot(t.forwardSpeed, t.lateralSpeed) > 0.5;
+    const crouched = !!t && t.crouchAmount > 0.5;
+    setWalking(moving, crouched);
+  });
+  return null;
 }
 
 // Drives time-based combat (respawns) once per frame, scene-wide.
@@ -75,7 +106,7 @@ function DevHook() {
   const camera = useThree((s) => s.camera);
   useEffect(() => {
     if (!import.meta.env.DEV) return;
-    (window as unknown as { __mosh?: unknown }).__mosh = { useGame, transforms, raycastShot, combat, LOCAL_ID, gl, scene, camera };
+    (window as unknown as { __mosh?: unknown }).__mosh = { useGame, useControls, transforms, raycastShot, combat, LOCAL_ID, gl, scene, camera, updateLock, getLock };
   }, [gl, scene, camera]);
   return null;
 }
@@ -114,11 +145,14 @@ function Scene() {
         {/* Exact spot the studio proved is solid ground (char stood at y -7). */}
         <PlayerController spawn={[12, -6, -9.5]} />
         <Weapon />
+        <TargetLock />
         <Bots count={3} />
         <Vfx />
         <CombatTicker />
+        <Footsteps />
       </Physics>
 
+      <AudioUnlock />
       <InputController />
       <DevHook />
       <RenderPass />

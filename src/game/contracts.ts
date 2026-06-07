@@ -148,6 +148,7 @@ export interface Controls {
   strafeLeft: boolean;
   strafeRight: boolean;
   crouch: boolean;
+  aiming: boolean; // held: scope / zoom in (vision: exactly one eye closed)
   firePressed: boolean;
   reloadPressed: boolean;
   tracked: boolean; // input source is live (always true for keyboard)

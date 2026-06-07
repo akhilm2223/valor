@@ -70,6 +70,15 @@ const SNAP_DIST = 0.3;
 const MAX_SLOPE_CLIMB = MathUtils.degToRad(45);
 const MIN_SLOPE_SLIDE = MathUtils.degToRad(30);
 const CROUCH_LERP = 10.0; // crouch transition rate (1/s)
+// Startup-race guard. The arena builds 80+ trimesh colliders over the first
+// frames after the GLB mounts; the player spawns only ~0.2 m above the ground,
+// so without this it free-falls through the not-yet-existent floor and is lost
+// forever (the "gun keeps going down" bug). For SETTLE_TIME we hold gravity off
+// so the floor can finish building, then drop normally. VOID_Y is a kill-plane
+// far below the lowest arena ground (~-7.4): if we ever end up beneath it,
+// hard-respawn at spawn. Together they make falling-out-of-world impossible.
+const SETTLE_TIME = 1.0; // s — gravity held off after mount while colliders build
+const VOID_Y = -25.0; // m — below this, respawn (no legit ground is this low)
 
 export function PlayerController({ spawn = [0, 1.2, 6] as Vec3 }: { spawn?: Vec3 }) {
   const camera = useThree((s) => s.camera);
@@ -87,6 +96,7 @@ export function PlayerController({ spawn = [0, 1.2, 6] as Vec3 }: { spawn?: Vec3
   const hvz = useRef(0); // horizontal world velocity Z
   const halfHeight = useRef<number>(CAPSULE.standHalfHeight); // current (lerped) capsule half-height
   const crouchAmount = useRef(0); // 0..1
+  const settle = useRef(SETTLE_TIME); // s left holding gravity off (startup-race guard)
   // The transform object we own and mutate in place (never reallocate).
   const tRef = useRef<Transform | null>(null);
 
@@ -141,6 +151,17 @@ export function PlayerController({ spawn = [0, 1.2, 6] as Vec3 }: { spawn?: Vec3
     const dt = world.timestep;
     const ctrl = useControls.getState();
 
+    // ── Startup-race + void guard (see SETTLE_TIME / VOID_Y) ─────────────
+    if (settle.current > 0) settle.current -= dt;
+    const here = rb.translation();
+    if (here.y < VOID_Y) {
+      // Fell out of the world (collider build race, or off an edge) — respawn.
+      rb.setNextKinematicTranslation({ x: spawn[0], y: spawn[1], z: spawn[2] });
+      vy.current = 0;
+      settle.current = SETTLE_TIME; // give the floor a moment again
+      return;
+    }
+
     // ── Look: consume + zero the deltas (we are their sole consumer) ─────
     yaw.current = wrapAngle(yaw.current - ctrl.yawDelta);
     pitch.current = MathUtils.clamp(pitch.current - ctrl.pitchDelta, -PITCH_LIMIT, PITCH_LIMIT);
@@ -178,7 +199,11 @@ export function PlayerController({ spawn = [0, 1.2, 6] as Vec3 }: { spawn?: Vec3
     hvz.current = MathUtils.damp(hvz.current, tvz, ACCEL, dt);
 
     // ── Vertical: integrate our own gravity (KCC has none) ───────────────
-    vy.current = Math.max(vy.current + GRAVITY * dt, TERMINAL_VY);
+    // While settling (startup), hold gravity off so the player rests at spawn
+    // until the arena's trimesh floor has finished building (snap-to-ground
+    // catches it the instant the colliders exist).
+    if (settle.current > 0) vy.current = 0;
+    else vy.current = Math.max(vy.current + GRAVITY * dt, TERMINAL_VY);
 
     // ── Compute + apply collider movement ────────────────────────────────
     const desired = { x: hvx.current * dt, y: vy.current * dt, z: hvz.current * dt };

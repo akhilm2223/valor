@@ -15,6 +15,7 @@
 
 import { type CombatSink, type DamageEvent, MAX_HEALTH, RESPAWN_MS } from "./contracts";
 import { useGame } from "./stores";
+import { playSfx } from "./sfx";
 
 /** Pure, side-effect-free damage resolution — the deterministic core. */
 export function computeDamage(health: number, amount: number): { health: number; dead: boolean } {
@@ -33,9 +34,11 @@ export const combat: CombatSink = {
     if (dead) {
       g.patch(targetId, { health: 0, alive: false, fireState: "ready", reloading: false, respawnAt: t + RESPAWN_MS });
       g.pushEvent({ kind: "kill", by: byId, on: targetId, t });
+      playSfx("scream"); // Wilhelm scream on a kill
     } else {
       g.patch(targetId, { health });
       g.pushEvent({ kind: "hit", by: byId, on: targetId, t });
+      playSfx("hit"); // hitmarker on a non-lethal hit
     }
   },
 };

@@ -38,9 +38,10 @@ import { useFrame } from "@react-three/fiber";
 import { Group } from "three";
 import { Gun } from "../Gun";
 import { AnimatedCharacter } from "./AnimatedCharacter";
-import { CAPSULE, resolveAnimState, type Vec3 } from "./contracts";
+import { CAPSULE, LOCAL_ID, resolveAnimState, type Vec3 } from "./contracts";
 import { makeEntity, transforms, useGame } from "./stores";
 import { raycastShot } from "./hitscan";
+import { setEntityWalk } from "./sfx";
 
 // Measured plaza floor (feet Y) of arena_opt.glb near the player spawn — the
 // player capsule settles with feet at ~-3.76. Bots are placed on this same
@@ -48,7 +49,7 @@ import { raycastShot } from "./hitscan";
 // SHORT and starts just above this level so firstHitOnly snaps to the plaza
 // rather than punching through to a lower carved layer (the map has overhangs /
 // layered floors — see Models.tsx).
-const FLOOR_Y = -3.76;
+const FLOOR_Y = -7.12;
 
 /** Refine the arena floor Y under (x,z) by casting DOWN from just above the
  *  plaza onto the world BVH. Short range so it can't fall through to a lower
@@ -59,14 +60,16 @@ function floorYAt(x: number, z: number): number | null {
 }
 // Distance from feet to capsule center (so the hit capsule wraps the body).
 const CENTER_OFFSET = CAPSULE.standHalfHeight + CAPSULE.radius; // 0.9
+// Bot footsteps fall off to silence at this distance from the local player.
+const BOT_WALK_MAX_DIST = 18; // m
 
 // Patrol: gently slide ±AMPLITUDE on local X over PERIOD seconds so locomotion
 // anim + moving-target hitscan both get exercised without the bot wandering off.
 const PATROL_AMPLITUDE = 1.2; // metres each side of the home X (stay on the slab)
 const PATROL_PERIOD = 4.0; // seconds for a full there-and-back cycle
 
-// The player spawns near [0,_,6] looking -Z; bots face roughly toward it.
-const PLAYER_SPAWN: Vec3 = [0, 0, 6];
+// The player spawns at [12,_,-9.5] looking -Z; bots face roughly toward it.
+const PLAYER_SPAWN: Vec3 = [12, -6, -9.5];
 
 // Alternating character GLBs so the dummies aren't visually identical.
 const CHARACTER_URLS = ["/models/character_b.glb", "/models/character_a.glb"] as const;
@@ -90,12 +93,13 @@ function yawToward(from: Vec3, to: Vec3): number {
 
 /** Build the default 3-bot layout, spread in front of the player spawn. */
 function defaultSpecs(count: number): BotSpec[] {
-  // In front of the player (spawn [0,_,6], looking -Z), close enough to stay on
-  // the same plaza slab and frame nicely in the spawn view.
+  // In FRONT of the player (spawn [12,_,-9.5], looking -Z = decreasing z), on the
+  // flat -7.12 plaza, spread ~6 m apart so left/center/right are clearly distinct
+  // targets (not a clump) for the aim-lock to pick between.
   const homes: Vec3[] = [
-    [-2.2, FLOOR_Y, 3.0],
-    [0, FLOOR_Y, 1.5],
-    [2.2, FLOOR_Y, 3.0],
+    [6, FLOOR_Y, -21], // left
+    [12, FLOOR_Y, -23], // center (a touch further → triangle)
+    [18, FLOOR_Y, -21], // right
   ];
   const specs: BotSpec[] = [];
   for (let i = 0; i < count; i++) {
@@ -204,10 +208,25 @@ function BotActor({ spec }: { spec: BotSpec }) {
     group.position.set(t.pos[0], t.pos[1] - CENTER_OFFSET, t.pos[2]);
     group.rotation.y = t.yaw;
 
+    // Footsteps: loop while this bot walks, volume falling off linearly with
+    // distance to the local player (silent past BOT_WALK_MAX_DIST).
+    const speed = Math.hypot(t.forwardSpeed, t.lateralSpeed);
+    const lp = transforms[LOCAL_ID]?.pos;
+    let walkGain = 0;
+    if (e.alive && speed > 0.5 && lp) {
+      const dx = t.pos[0] - lp[0], dy = t.pos[1] - lp[1], dz = t.pos[2] - lp[2];
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      walkGain = Math.max(0, 1 - dist / BOT_WALK_MAX_DIST);
+    }
+    setEntityWalk(spec.id, walkGain > 0.001, walkGain);
+
     // Resolve the clip; only re-render when it actually changes.
     const next = resolveAnimState(e, t);
     if (next !== animState) setAnimState(next);
   });
+
+  // Stop this bot's footstep voice when it unmounts.
+  useEffect(() => () => setEntityWalk(spec.id, false, 0), [spec.id]);
 
   return (
     <group ref={groupRef}>

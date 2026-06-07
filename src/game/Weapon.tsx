@@ -26,27 +26,36 @@
 //     yaw ±0.35°/shot, exp recovery 9/s; spread base 0.15° +0.45°/shot, max
 //     3.5°, decay 6/s.
 //
-//   ORDERING ASSUMPTION (load-bearing): PlayerController re-sets the camera base
-//   rotation every frame at its default priority (0). We add recoil in a LATE
-//   useFrame(priority 10) so it runs AFTER that base write; we add the FULL
-//   current (decaying) recoil on top each frame — NOT cumulative — precisely
-//   because the base is overwritten first. If PlayerController's camera write
-//   ever moves to a priority ≥ 10, this must be re-checked.
+//   CAMERA WRITE (load-bearing): PlayerController writes the look base into
+//   transforms[LOCAL_ID] (pitch/yaw) inside useBeforePhysicsStep — which fires
+//   only on a fixed-1/60 physics step, NOT every render frame. So our LATE
+//   useFrame(priority 10) SETS rotation = base + decaying recoil from that
+//   transform each frame (idempotent), rather than `+=` onto whatever the camera
+//   held — `+=` leaks an offset on render frames that had no physics step (>60Hz
+//   monitors), making the view/gun drift and refuse to hold still. The viewmodel
+//   is then hung off the final camera pose in the same loop so the gun tracks aim
+//   and recoil exactly.
 // ─────────────────────────────────────────────────────────────────────────
 
 import { useRef } from "react";
 import { useFrame, useThree } from "@react-three/fiber";
-import { type Group, Quaternion, Vector3 } from "three";
+import { MathUtils, type PerspectiveCamera, Quaternion, Vector3 } from "three";
 import { LOCAL_ID, MAG_SIZE, SHOT_DAMAGE, type Vec3 } from "./contracts";
-import { useControls, useGame } from "./stores";
+import { transforms, useControls, useGame } from "./stores";
 import { raycastShot } from "./hitscan";
 import { combat } from "./combat";
 import { vfx } from "./vfx";
-import { Gun } from "../Gun";
+import { FpvArms } from "./FpvArms";
+import { playSfx } from "./sfx";
+import { getLock } from "./aimAssist";
 
 // ── Tunables (§2 tables) ───────────────────────────────────────────────────
 const FIRE_INTERVAL = 0.25; // s — "Sheriff feel" cap
 const RELOAD_TIME = 0.7; // s — full fire-lockout
+// Aim-down-sights zoom (controls.aiming; vision = one eye closed).
+const NORMAL_FOV = 75; // matches the Canvas camera fov
+const SCOPED_FOV = 40; // zoomed-in FOV when aiming (~1.9× magnification)
+const AIM_LERP = 14; // FOV damp rate (1/s)
 const FIRE_ANIM_TIME = 0.12; // s — how long fireState stays "firing"
 const MAX_RANGE = 200; // m — shot reach
 
@@ -59,19 +68,15 @@ const SPREAD_PER_SHOT = 0.45 * DEG;
 const SPREAD_MAX = 3.5 * DEG;
 const SPREAD_DECAY = 6; // /s linear decay back toward base
 
-// Viewmodel offset from the camera, in the camera's LOCAL frame (right = +X,
-// up = +Y, forward = -Z). The gun sits down-right-forward of the eye.
-const VM_RIGHT = 0.18;
-const VM_UP = -0.22; // down
-const VM_FWD = -0.5; // forward (camera looks down -Z)
-// Barrel-tip offset (muzzle world position for VFX), same local frame.
+// Barrel-tip offset (muzzle world position for VFX), in the camera's LOCAL frame
+// (right = +X, up = +Y, forward = -Z).
 const MUZZLE_RIGHT = 0.18;
 const MUZZLE_UP = -0.16;
 const MUZZLE_FWD = -0.9;
 
+
 export function Weapon() {
   const camera = useThree((s) => s.camera);
-  const vmRef = useRef<Group>(null);
 
   // ── Per-frame mutable state (refs, never React state) ──────────────────
   const cooldown = useRef(0); // s until next shot allowed
@@ -101,19 +106,35 @@ export function Weapon() {
     const nextAmmo = ammo - 1;
     g.patch(LOCAL_ID, { ammo: nextAmmo, fireState: "firing" });
     fireAnimTimer.current = FIRE_ANIM_TIME;
+    playSfx("shot"); // gunshot crack
 
-    // 2. ray from the camera; spread cone applied to the DIRECTION.
+    // 2. ray from the camera.
     camera.getWorldPosition(tmpOrigin.current);
     camera.getWorldDirection(tmpDir.current).normalize();
-    applySpread(tmpDir.current);
-
     const origin = tmpOrigin.current;
-    const dir = tmpDir.current;
     const originVec: Vec3 = [origin.x, origin.y, origin.z];
-    const dirVec: Vec3 = [dir.x, dir.y, dir.z];
 
-    // 3-4. world (BVH) + players (ray-vs-capsule), nearest wins.
-    const hit = raycastShot(originVec, dirVec, MAX_RANGE);
+    // 3-4. AIM ASSIST: shoot the LOCKED target (the red ring) — snap the bullet
+    // onto it, re-confirming line-of-sight at fire time (a wall that moved in
+    // cancels the assist). No lock → manual shot with the spread cone.
+    let dirVec: Vec3 = [tmpDir.current.x, tmpDir.current.y, tmpDir.current.z];
+    let hit: ReturnType<typeof raycastShot> = null;
+    const lock = getLock();
+    let assisted = false;
+    if (lock) {
+      const dx = lock.point[0] - origin.x, dy = lock.point[1] - origin.y, dz = lock.point[2] - origin.z;
+      const inv = 1 / (Math.hypot(dx, dy, dz) || 1);
+      const ld: Vec3 = [dx * inv, dy * inv, dz * inv];
+      const lhit = raycastShot(originVec, ld, MAX_RANGE);
+      if (lhit && lhit.kind === "entity" && lhit.entityId && lhit.entityId !== LOCAL_ID) {
+        dirVec = ld; hit = lhit; assisted = true; // clean snap onto the locked enemy
+      }
+    }
+    if (!assisted) {
+      applySpread(tmpDir.current);
+      dirVec = [tmpDir.current.x, tmpDir.current.y, tmpDir.current.z];
+      hit = raycastShot(originVec, dirVec, MAX_RANGE);
+    }
 
     // 5. on an entity hit → deal damage through the combat sink.
     if (hit && hit.kind === "entity" && hit.entityId) {
@@ -126,7 +147,7 @@ export function Weapon() {
     vfx.muzzle(muzzle);
     const to: Vec3 = hit
       ? hit.point
-      : [origin.x + dir.x * MAX_RANGE, origin.y + dir.y * MAX_RANGE, origin.z + dir.z * MAX_RANGE];
+      : [origin.x + dirVec[0] * MAX_RANGE, origin.y + dirVec[1] * MAX_RANGE, origin.z + dirVec[2] * MAX_RANGE];
     vfx.tracer(muzzle, to);
 
     // Recoil kick (transient — recovered in the loop).
@@ -168,6 +189,7 @@ export function Weapon() {
     if (me && me.ammo >= MAG_SIZE) return;
     reloadTimer.current = RELOAD_TIME;
     useGame.getState().patch(LOCAL_ID, { reloading: true, fireState: "reloading" });
+    playSfx("reload"); // mag-in / slide-rack
   }
 
   // World position of the viewmodel barrel tip (for muzzle/tracer origin).
@@ -186,6 +208,16 @@ export function Weapon() {
   // ── Main update loop (default priority) ────────────────────────────────
   useFrame((_, dt) => {
     const c = useControls.getState();
+
+    // Scope/aim-down-sights: lerp the camera FOV toward zoomed when `aiming`.
+    const cam = camera as PerspectiveCamera;
+    if (cam.isPerspectiveCamera) {
+      const targetFov = c.aiming ? SCOPED_FOV : NORMAL_FOV;
+      if (Math.abs(cam.fov - targetFov) > 0.05) {
+        cam.fov = MathUtils.damp(cam.fov, targetFov, AIM_LERP, dt);
+        cam.updateProjectionMatrix();
+      }
+    }
 
     // Reload edge: begin a reload, then clear the pulse.
     if (c.reloadPressed) {
@@ -240,36 +272,31 @@ export function Weapon() {
     recoilPitch.current *= recover;
     recoilYaw.current *= recover;
     spread.current = Math.max(0, spread.current - SPREAD_DECAY * DEG * dt);
-
-    // ── Viewmodel: copy camera pose + a local offset every frame ──────────
-    const vm = vmRef.current;
-    if (vm) {
-      camera.getWorldPosition(vm.position);
-      camera.getWorldQuaternion(tmpQuat.current);
-      vm.quaternion.copy(tmpQuat.current);
-      // Offset in the camera's local frame (forward -Z, right +X, up +Y).
-      const fwd = tmpDir.current.set(0, 0, -1).applyQuaternion(tmpQuat.current);
-      const right = tmpRight.current.set(1, 0, 0).applyQuaternion(tmpQuat.current);
-      const up = tmpUp.current.set(0, 1, 0).applyQuaternion(tmpQuat.current);
-      vm.position.addScaledVector(fwd, -VM_FWD);
-      vm.position.addScaledVector(right, VM_RIGHT);
-      vm.position.addScaledVector(up, VM_UP);
-    }
   });
 
-  // ── LATE loop (priority 10): add transient recoil ON TOP of the camera ──
-  // PlayerController re-sets camera.rotation each frame at priority 0; we add the
-  // full current (decaying) recoil after that. Not cumulative — the base is
-  // overwritten first (see header ORDERING ASSUMPTION).
+  // ── LATE loop (priority 10): write the FINAL camera rotation ────────────
+  // PlayerController writes the look base into transforms[LOCAL_ID] (pitch/yaw)
+  // — but it does so in useBeforePhysicsStep, which fires only on a fixed-1/60
+  // physics step, NOT every render frame. So we must NOT do `rotation +=` (that
+  // leaks/accumulates an offset on the render frames with no step, and the view
+  // drifts and won't hold still). Instead we SET rotation = base + recoil from
+  // the authoritative transform every frame: idempotent regardless of physics
+  // cadence. FpvArms then tracks the camera at priority 11 (after this), so the
+  // arms + gun inherit the final look + recoil.
   useFrame(() => {
     if (camera.rotation.order !== "YXZ") camera.rotation.order = "YXZ";
-    camera.rotation.x += recoilPitch.current;
-    camera.rotation.y += recoilYaw.current;
+    const t = transforms[LOCAL_ID];
+    if (t) {
+      camera.rotation.x = t.pitch + recoilPitch.current;
+      camera.rotation.y = t.yaw + recoilYaw.current;
+      camera.rotation.z = 0;
+    } else {
+      // No transform yet (first frames): fall back to additive recoil.
+      camera.rotation.x += recoilPitch.current;
+      camera.rotation.y += recoilYaw.current;
+    }
   }, 10);
 
-  return (
-    <group ref={vmRef}>
-      <Gun length={0.22} variant="normal" />
-    </group>
-  );
+  // First-person arms hold the gun (the real rigged hands) — see FpvArms.
+  return <FpvArms />;
 }

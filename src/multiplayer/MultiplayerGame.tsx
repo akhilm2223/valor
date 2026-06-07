@@ -23,7 +23,6 @@
 
 import { Component, type ReactNode, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { Sky, Environment } from "@react-three/drei";
 import { Raycaster, Vector3, MathUtils, type Group, type PerspectiveCamera } from "three";
 import { Arena, FitModel } from "../Models";
 import { Scatter } from "../Scatter";
@@ -422,9 +421,13 @@ interface VisionInputBridgeProps {
   localPlayer: Player | undefined;
   players: Player[];
   arenaRef: React.RefObject<Group | null>;
+  // Called (only on change) when aim-assist acquires/loses a target, so the HUD
+  // crosshair can show the player WHERE the gun will actually shoot.
+  onLockChange?: (locked: boolean) => void;
 }
 
-function VisionInputBridge({ driver, localPlayer, players, arenaRef }: VisionInputBridgeProps) {
+function VisionInputBridge({ driver, localPlayer, players, arenaRef, onLockChange }: VisionInputBridgeProps) {
+  const lockedPrev = useRef(false);
   const camera = useThree((s) => s.camera);
   const rc = useRef(new Raycaster());
   const rayOrigin = useRef(new Vector3());
@@ -491,6 +494,13 @@ function VisionInputBridge({ driver, localPlayer, players, arenaRef }: VisionInp
     // ── Aim → camera-forward, bent onto the nearest enemy by aim assist ────
     const assist = pickAssistAim(localPlayer, players, fx, fz);
     const aim = assist ?? { x: fx, y: 0, z: fz };
+    // Surface lock state to the HUD (only on change — cheap). `assist` non-null
+    // means an enemy is in the cone and the shot WILL bend onto them.
+    const locked = assist !== null;
+    if (locked !== lockedPrev.current) {
+      lockedPrev.current = locked;
+      onLockChange?.(locked);
+    }
 
     // ── Fire / reload edge pulses — read + clear (we're the consumer) ──────
     const firePressed = ctrl.firePressed;
@@ -598,26 +608,32 @@ function VisionInputBridge({ driver, localPlayer, players, arenaRef }: VisionInp
 
 // ---- DOM overlays --------------------------------------------------------
 
-// Center crosshair dot — a fixed reference for where the camera (and thus the
-// pre-assist aim) points. Aim assist bends the actual shot onto a nearby enemy.
-function Crosshair() {
+// Center crosshair — where the camera (and gun) points. A proper 4-tick cross +
+// dot so you can actually SEE your aim. When aim-assist has an enemy in the cone
+// it turns RED with a lock bracket + label, telling you the shot will bend onto
+// them — that's the "auto-aim" made visible.
+function Crosshair({ locked = false }: { locked?: boolean }) {
+  const color = locked ? "#ff3b3b" : "rgba(255,255,255,0.95)";
+  const shadow = "0 0 0 1px rgba(0,0,0,0.65)";
+  const tick = (s: React.CSSProperties) => (
+    <div style={{ position: "absolute", top: "50%", left: "50%", background: color, boxShadow: shadow, ...s }} />
+  );
   return (
-    <div
-      style={{
-        position: "absolute",
-        top: "50%",
-        left: "50%",
-        width: 6,
-        height: 6,
-        marginLeft: -3,
-        marginTop: -3,
-        borderRadius: "50%",
-        background: "rgba(255,255,255,0.85)",
-        boxShadow: "0 0 0 1.5px rgba(0,0,0,0.55)",
-        pointerEvents: "none",
-        zIndex: 5,
-      }}
-    />
+    <div style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: 44, height: 44, pointerEvents: "none", zIndex: 5 }}>
+      <div style={{ position: "absolute", top: "50%", left: "50%", width: 4, height: 4, marginLeft: -2, marginTop: -2, borderRadius: "50%", background: color, boxShadow: shadow }} />
+      {tick({ width: 2, height: 9, marginLeft: -1, marginTop: -17 })}
+      {tick({ width: 2, height: 9, marginLeft: -1, marginTop: 8 })}
+      {tick({ width: 9, height: 2, marginLeft: -17, marginTop: -1 })}
+      {tick({ width: 9, height: 2, marginLeft: 8, marginTop: -1 })}
+      {locked && (
+        <>
+          <div style={{ position: "absolute", top: "50%", left: "50%", width: 32, height: 32, marginLeft: -16, marginTop: -16, border: `2px solid ${color}`, borderRadius: 5, boxShadow: shadow }} />
+          <div style={{ position: "absolute", top: "100%", left: "50%", transform: "translateX(-50%)", marginTop: 6, color, fontSize: 10, fontWeight: 800, letterSpacing: 1, textShadow: "0 1px 2px rgba(0,0,0,0.8)", whiteSpace: "nowrap" }}>
+            ● LOCKED
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -860,6 +876,10 @@ export function MultiplayerGame() {
   // raycast can hit ONLY the terrain (never the FPV arms or player rigs).
   const arenaRef = useRef<Group>(null);
 
+  // Crosshair lock state — set by VisionInputBridge when aim-assist acquires an
+  // enemy (only flips on change, so this re-render is rare).
+  const [aimLocked, setAimLocked] = useState(false);
+
   // Combat reactions from the server's shot stream. For every NEW shot row we
   //   • play gunfire (enemy shots only — our own already cracked on the local
   //     fire edge, so we'd double it),
@@ -1016,20 +1036,15 @@ export function MultiplayerGame() {
         <ContextRecovery />
         <RenderPass />
         <color attach="background" args={["#bcd4e6"]} />
-        <fog attach="fog" args={["#bcd4e6", 60, 220]} />
-        <Sky sunPosition={[60, 18, 40]} turbidity={3} rayleigh={3} mieCoefficient={0.005} mieDirectionalG={0.7} />
-        <hemisphereLight args={["#bcd4e6", "#5a4633", 0.9]} />
-        <directionalLight position={[60, 18, 40]} intensity={2.2} />
-        {/* Image-based lighting — THE reason single-player looks bright and MP
-            looked "black and dark": the arena GLB is PBR (meshStandardMaterial),
-            which renders near-black with no environment map to reflect. Same
-            preset single-player uses. Isolated Suspense so a slow/blocked CDN
-            fetch can't blank the scene (the lights above still light it). No
-            shadow maps here — that's the GPU-heavy part we keep off for the two
-            MediaPipe contexts; the env map alone is cheap and fixes the dark. */}
-        <Suspense fallback={null}>
-          <Environment preset="city" />
-        </Suspense>
+        {/* Flat, cheap lighting — NO atmospheric <Sky> shader and NO image-based
+            <Environment> (its PMREM convolution is the "smoothing/shader pack"
+            that made the map look hazy + cost GPU). Strong analytic lights keep
+            the PBR arena bright without those passes: ambient fills every face so
+            nothing renders black, hemisphere tints sky/ground, one directional
+            adds shape. No fog. This is the lighter, cleaner "old map" look. */}
+        <ambientLight intensity={1.5} />
+        <hemisphereLight args={["#dfeaf2", "#6b5a44", 1.1]} />
+        <directionalLight position={[60, 40, 30]} intensity={2.4} />
         <Suspense fallback={null}>
           <group ref={arenaRef}>
             <Arena />
@@ -1064,7 +1079,7 @@ export function MultiplayerGame() {
         <CamRig localPlayer={localPlayer} />
         {joined ? (
           <>
-            <VisionInputBridge driver={driver} localPlayer={localPlayer} players={players} arenaRef={arenaRef} />
+            <VisionInputBridge driver={driver} localPlayer={localPlayer} players={players} arenaRef={arenaRef} onLockChange={setAimLocked} />
             {/* Keyboard/mouse fallback — writes the SAME useControls store the
                 webcam does, so testing without a camera still works. */}
             <InputController />
@@ -1077,8 +1092,9 @@ export function MultiplayerGame() {
       <KillFeed kills={shots} playersById={playersById} />
       <SpectatorOverlay localPlayer={localPlayer} match={match} />
 
-      {/* Crosshair — body-aim is coarse, so show where the camera points. */}
-      {joined && localPlayer?.alive ? <Crosshair /> : null}
+      {/* Crosshair — body-aim is coarse, so show where the camera points; turns
+          red + "LOCKED" when aim-assist has an enemy and will bend the shot. */}
+      {joined && localPlayer?.alive ? <Crosshair locked={aimLocked} /> : null}
 
       {/* Webcam body control (DOM overlay — owns a <video>, must be OUTSIDE the
           Canvas). Mounted only after joining so we don't grab the camera early.

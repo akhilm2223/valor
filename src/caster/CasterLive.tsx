@@ -17,6 +17,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { QrJoinBadge } from "../spectator/QrJoinBadge";
+import { useSpectatorCount } from "../net/useValor";
 import { pickBark, renderBark } from "./Barks";
 import {
   createLiveKillStream,
@@ -54,6 +55,10 @@ export function CasterLive() {
   const [killCount, setKillCount] = useState(0);
   const [connStatus, setConnStatus] = useState<"connecting" | "ready" | "error" | "idle">("idle");
   const [error, setError] = useState<string | null>(null);
+  // State mirror of connRef so the spectator-count hook can react to the
+  // connection's ready/idle transitions.
+  const [conn, setConn] = useState<ValorConnection | null>(null);
+  const spectatorCount = useSpectatorCount(conn);
 
   // Mock fallback (for ?mock query param). Lets us drive Tier 1 + Tier 2 even
   // when no game session is running.
@@ -164,6 +169,7 @@ export function CasterLive() {
     const conn = connectValor({
       onReady: () => {
         setConnStatus("ready");
+        setConn(conn);
         appendFeed({ kind: "status", text: "Subscription applied · live feed active" });
         streamRef.current = createLiveKillStream(conn, {
           onKill: handleKill,
@@ -196,6 +202,7 @@ export function CasterLive() {
       /* noop */
     }
     connRef.current = null;
+    setConn(null);
     queue.clear();
     setRunning(false);
     setConnStatus("idle");
@@ -248,6 +255,26 @@ export function CasterLive() {
             audio: {audioOn ? "unlocked" : "locked"} · kills: {killCount} · stdb: {connStatus}
             {error ? ` (${error})` : null}
           </span>
+          {connStatus === "ready" ? (
+            <span
+              style={{
+                fontSize: 13,
+                padding: "4px 10px",
+                background: "rgba(125,176,255,0.16)",
+                border: "1px solid rgba(125,176,255,0.35)",
+                borderRadius: 999,
+                color: "#cfe1ff",
+                fontWeight: 600,
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+              }}
+              title="Live spectator count from the `spectators` table"
+            >
+              <span aria-hidden>👁</span>
+              {spectatorCount} watching
+            </span>
+          ) : null}
           <a href="#" style={{ marginLeft: "auto", color: "#7db0ff", fontSize: 13 }}>
             ← back to studio
           </a>

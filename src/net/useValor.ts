@@ -188,6 +188,32 @@ export function useShots(conn: ValorConnection | null, limit = 50): Shot[] {
  * Newest-first window over the `leaderboard` table. `limit` defaults to 10 to
  * match the Leaderboard UI's recent-rounds cap.
  */
+/**
+ * Live count of spectator rows on the `spectators` table. Used by the caster
+ * overlay to show "👁 N watching" — pulled fresh from STDB so the count
+ * tracks join/leave + on_disconnect cleanup in real time.
+ */
+export function useSpectatorCount(conn: ValorConnection | null): number {
+  const [count, setCount] = useState(0);
+  useEffect(() => {
+    if (!conn) return;
+    const refresh = () => {
+      let n = 0;
+      for (const _ of conn.db.spectators.iter()) n++;
+      setCount(n);
+    };
+    refresh();
+    const onAny = () => refresh();
+    conn.db.spectators.onInsert(onAny);
+    conn.db.spectators.onDelete(onAny);
+    return () => {
+      conn.db.spectators.removeOnInsert(onAny);
+      conn.db.spectators.removeOnDelete(onAny);
+    };
+  }, [conn]);
+  return count;
+}
+
 export function useLeaderboardRows(
   conn: ValorConnection | null,
   limit = 10,

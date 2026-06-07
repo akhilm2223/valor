@@ -11,9 +11,13 @@
 // background + backdrop blur + white text. Drop-in route at `#leaderboard`.
 //
 // Phase 4 (caster) can reuse this for the post-match recap screen.
+//
+// Phase 5 swap: connection acquisition + row subscription bookkeeping now live
+// in src/net/useValor.ts. Visible behavior unchanged.
 
 import { useEffect, useMemo, useState } from "react";
-import { connectValor, type ValorConnection, type LeaderboardRow } from "../net/Connection";
+import type { LeaderboardRow } from "../net/Connection";
+import { useValorConnection, useLeaderboardRows } from "../net/useValor";
 
 // "3 min ago" / "just now" / "1 h ago" — small, no library.
 function relativeTime(date: Date, now: number): string {
@@ -28,41 +32,6 @@ function relativeTime(date: Date, now: number): string {
   return `${days} d ago`;
 }
 
-// Pull live rows out of the connection cache. Keeps the last 10 sorted newest first.
-function useLeaderboardRows(conn: ValorConnection | null): LeaderboardRow[] {
-  const [rows, setRows] = useState<LeaderboardRow[]>([]);
-
-  useEffect(() => {
-    if (!conn) return;
-
-    const refresh = () => {
-      const all: LeaderboardRow[] = [];
-      // conn.db.leaderboard is a TableCacheImpl exposing iter() + on{Insert,Update,Delete}.
-      for (const r of conn.db.leaderboard.iter()) all.push(r);
-      // Newest first by playedAt.toMillis(); cap at 10.
-      all.sort((a, b) => {
-        const ta = a.playedAt.toMillis();
-        const tb = b.playedAt.toMillis();
-        return ta < tb ? 1 : ta > tb ? -1 : 0;
-      });
-      setRows(all.slice(0, 10));
-    };
-
-    refresh();
-    const onInsert = () => refresh();
-    const onDelete = () => refresh();
-    conn.db.leaderboard.onInsert(onInsert);
-    conn.db.leaderboard.onDelete(onDelete);
-
-    return () => {
-      conn.db.leaderboard.removeOnInsert(onInsert);
-      conn.db.leaderboard.removeOnDelete(onDelete);
-    };
-  }, [conn]);
-
-  return rows;
-}
-
 // Tick `now` every 30s so relative-time strings stay fresh without thrashing renders.
 function useTickingClock(): number {
   const [now, setNow] = useState(() => Date.now());
@@ -74,29 +43,12 @@ function useTickingClock(): number {
 }
 
 export function Leaderboard() {
-  const [conn, setConn] = useState<ValorConnection | null>(null);
-  const [status, setStatus] = useState<"connecting" | "ready" | "error">("connecting");
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    const c = connectValor({
-      onReady: () => setStatus("ready"),
-      onError: (err) => {
-        setStatus("error");
-        setError(err.message ?? String(err));
-      },
-    });
-    setConn(c);
-    return () => {
-      try { c.disconnect(); } catch { /* noop */ }
-    };
-  }, []);
-
-  const rows = useLeaderboardRows(conn);
+  const { conn, status, error } = useValorConnection();
+  const rows = useLeaderboardRows(conn, 10);
   const now = useTickingClock();
   const headerText = useMemo(() => {
     if (status === "connecting") return "Connecting to SpacetimeDB…";
-    if (status === "error") return `Connection error: ${error}`;
+    if (status === "error") return `Connection error: ${error?.message ?? "unknown"}`;
     if (rows.length === 0) return "No rounds played yet";
     return `${rows.length} recent round${rows.length === 1 ? "" : "s"}`;
   }, [status, error, rows.length]);

@@ -23,8 +23,8 @@
 
 import { Component, type ReactNode, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { Sky } from "@react-three/drei";
-import { Raycaster, Vector3, type Group } from "three";
+import { Sky, Environment } from "@react-three/drei";
+import { Raycaster, Vector3, MathUtils, AdditiveBlending, type Group, type PerspectiveCamera, type Mesh, type PointLight } from "three";
 import { Arena, FitModel } from "../Models";
 import { Scatter } from "../Scatter";
 import { Gun } from "../Gun";
@@ -34,6 +34,7 @@ import { VisionController } from "../game/VisionController";
 import { InputController } from "../game/input";
 import { useControls } from "../game/stores";
 import { CAPSULE } from "../game/contracts";
+import { playSfx, initAudio } from "../game/sfx";
 import {
   useValorConnection,
   useLocalPlayer,
@@ -353,20 +354,34 @@ function pickAssistAim(
   return best;
 }
 
+// First-person feel constants (mirrors single-player Weapon.tsx so MP fires/
+// scopes the same way). The Canvas camera is created at fov 55; scope zooms to
+// 40 (~1.4×). Recoil is a transient pitch kick recovered each frame.
+const NORMAL_FOV = 55;
+const SCOPED_FOV = 40;
+const AIM_LERP = 12; // fov damp rate toward target
+const RECOIL_KICK = 0.05; // radians of upward pitch per shot
+const RECOIL_RECOVER = 14; // damp rate back to neutral
+
 interface VisionInputBridgeProps {
   driver: ValorDriver | null;
   localPlayer: Player | undefined;
   players: Player[];
   arenaRef: React.RefObject<Group | null>;
+  // Set to a positive remaining-time (seconds) on each shot so the MuzzleFlash
+  // component (which shares this ref) lights up for one quick frame burst.
+  fireFlash: React.RefObject<number>;
 }
 
-function VisionInputBridge({ driver, localPlayer, players, arenaRef }: VisionInputBridgeProps) {
+function VisionInputBridge({ driver, localPlayer, players, arenaRef, fireFlash }: VisionInputBridgeProps) {
   const camera = useThree((s) => s.camera);
   const rc = useRef(new Raycaster());
   const rayOrigin = useRef(new Vector3());
   const groundY = useRef(0);
   const rcFrame = useRef(0);
   const yaw = useRef(0);
+  // Transient recoil pitch (radians). Kicked on fire, damped back to 0.
+  const recoilPitch = useRef(0);
   // Have we oriented the camera for the current life yet? (reset on death.)
   const yawInit = useRef(false);
   // Smoothed feet position. Server position lands at 30Hz; we render at 60+Hz,
@@ -431,6 +446,18 @@ function VisionInputBridge({ driver, localPlayer, players, arenaRef }: VisionInp
       useControls.setState({ firePressed: false, reloadPressed: false });
     }
 
+    // ── Local fire feedback — the server's fire() reducer handles damage, but
+    // it sends back NO muzzle/recoil/sound, so without this the trigger feels
+    // dead even though ammo ticks down. Fire the feel locally on the rising edge
+    // (gated the same way the Driver gates the reducer: alive + ammo) so the
+    // shot looks/sounds fired the instant you pull. reload plays its rack.
+    if (firePressed && localPlayer.alive && localPlayer.ammo > 0) {
+      playSfx("shot");
+      recoilPitch.current += RECOIL_KICK;
+      fireFlash.current = 0.05; // seconds of muzzle flash
+    }
+    if (reload) playSfx("reload");
+
     driver.updateInput(
       { aim, lean: { x: lx, z: lz }, crouch: ctrl.crouch, firePressed, reload },
       localPlayer,
@@ -466,13 +493,92 @@ function VisionInputBridge({ driver, localPlayer, players, arenaRef }: VisionInp
         }
       }
       camera.position.set(smooth.current.x, groundY.current + eye, smooth.current.z);
-      camera.rotation.set(0, yaw.current, 0, "YXZ");
+      // Recoil: transient upward pitch on top of the yaw-only body aim, damped
+      // back to neutral. Negative X pitches the view up (YXZ order).
+      recoilPitch.current = MathUtils.damp(recoilPitch.current, 0, RECOIL_RECOVER, dtRaw);
+      camera.rotation.set(-recoilPitch.current, yaw.current, 0, "YXZ");
+
+      // Scope / aim-down-sights: wink (one eye closed) sets ctrl.aiming; lerp the
+      // camera FOV toward zoomed. Same behavior as single-player Weapon.tsx.
+      const cam = camera as PerspectiveCamera;
+      if (cam.isPerspectiveCamera) {
+        const targetFov = ctrl.aiming ? SCOPED_FOV : NORMAL_FOV;
+        if (Math.abs(cam.fov - targetFov) > 0.05) {
+          cam.fov = MathUtils.damp(cam.fov, targetFov, AIM_LERP, dtRaw);
+          cam.updateProjectionMatrix();
+        }
+      }
     } else {
       smooth.current = null; // reset so respawn snaps cleanly
+      recoilPitch.current = 0;
+      // Hand a clean (un-zoomed) FOV back to the spectator cam on death.
+      const cam = camera as PerspectiveCamera;
+      if (cam.isPerspectiveCamera && Math.abs(cam.fov - NORMAL_FOV) > 0.05) {
+        cam.fov = NORMAL_FOV;
+        cam.updateProjectionMatrix();
+      }
     }
+
+    // TEMP DEBUG (remove): movement diagnosis. animState reflects the SERVER's
+    // view of our lean (it sets Walk/Idle in submit_input) → proves whether the
+    // reducer call lands. serverLean is what the server stored.
+    (window as unknown as Record<string, unknown>).__dbg = {
+      ppos: [+localPlayer.position.x.toFixed(2), +localPlayer.position.z.toFixed(2)],
+      lean: [+lx.toFixed(2), +lz.toFixed(2)],
+      serverLean: [+localPlayer.lean.x.toFixed(2), +localPlayer.lean.z.toFixed(2)],
+      anim: localPlayer.animState?.tag,
+      mF: ctrl.moveForward,
+    };
   });
 
   return null;
+}
+
+// MuzzleFlash — a quick bright pop at the barrel on each shot. Shares the
+// `fireFlash` countdown ref with VisionInputBridge (set to ~0.05s on fire). It
+// tracks the camera every frame and sits at a gun-barrel offset in the camera's
+// local frame, so the flash reads as coming from the held weapon. No flash =
+// invisible + light off (zero cost when not shooting).
+const MUZZLE_OFFSET = new Vector3(0.18, -0.16, -0.62); // right, down, forward(-Z)
+
+function MuzzleFlash({ flash }: { flash: React.RefObject<number> }) {
+  const camera = useThree((s) => s.camera);
+  const mesh = useRef<Mesh>(null);
+  const light = useRef<PointLight>(null);
+  const pos = useRef(new Vector3());
+
+  useFrame((_, dt) => {
+    const m = mesh.current;
+    const l = light.current;
+    if (!m || !l) return;
+    // Park the flash at the barrel: camera position + offset rotated into world.
+    pos.current.copy(MUZZLE_OFFSET).applyQuaternion(camera.quaternion).add(camera.position);
+    m.position.copy(pos.current);
+    m.quaternion.copy(camera.quaternion);
+    l.position.copy(pos.current);
+
+    const t = flash.current;
+    if (t > 0) {
+      flash.current = Math.max(0, t - dt);
+      const k = flash.current / 0.05; // 1 → 0 over the burst
+      m.visible = true;
+      m.scale.setScalar(0.18 + 0.22 * k);
+      l.intensity = 6 * k;
+    } else if (m.visible) {
+      m.visible = false;
+      l.intensity = 0;
+    }
+  });
+
+  return (
+    <group>
+      <mesh ref={mesh} visible={false}>
+        <planeGeometry args={[1, 1]} />
+        <meshBasicMaterial color="#fff2b0" blending={AdditiveBlending} transparent depthWrite={false} />
+      </mesh>
+      <pointLight ref={light} color="#ffd27a" intensity={0} distance={6} decay={2} />
+    </group>
+  );
 }
 
 // ---- DOM overlays --------------------------------------------------------
@@ -739,6 +845,28 @@ export function MultiplayerGame() {
   // raycast can hit ONLY the terrain (never the FPV arms or player rigs).
   const arenaRef = useRef<Group>(null);
 
+  // Muzzle-flash countdown shared between the input bridge (writer, on fire) and
+  // the MuzzleFlash component (reader, renders the pop).
+  const fireFlash = useRef(0);
+
+  // Combat audio from the server's shot stream: play enemy gunfire so you HEAR
+  // the other player shooting, and a hit thock when one of OUR shots lands.
+  // (Our own gunshot already plays instantly on the local fire edge, so we skip
+  // shooterId === us here to avoid a double crack.) Track the highest shot id
+  // seen so we only react to genuinely new rows, not the backlog at mount.
+  const lastShotId = useRef<bigint | null>(null);
+  useEffect(() => {
+    const myId = localPlayer?.id;
+    for (const s of shots) {
+      if (lastShotId.current !== null && s.id > lastShotId.current) {
+        if (s.shooterId !== myId) playSfx("shot", 0.7); // enemy gunfire
+        else if (s.hit) playSfx("hit"); // confirmation our shot connected
+      }
+    }
+    const maxId = shots.reduce((m, s) => (s.id > m ? s.id : m), lastShotId.current ?? -1n);
+    lastShotId.current = maxId;
+  }, [shots, localPlayer]);
+
   // Driver lifecycle. Spawn one as soon as the connection is ready; tear it
   // down on unmount or when the connection flips.
   const driverRef = useRef<ValorDriver | null>(null);
@@ -815,8 +943,12 @@ export function MultiplayerGame() {
   const [joined, setJoined] = useState(false);
   const onJoinSubmit = (name: string) => {
     if (!driverRef.current) return;
-    // Browser autoplay gate — must run inside this click handler.
+    // Browser autoplay gate — must run inside this click handler. unlock() arms
+    // the TTS/commentary queue; initAudio() arms the SFX engine (gunshots, hit,
+    // reload, scream). Without initAudio the whole playSfx path is a silent
+    // no-op in MP — that's why shooting made no sound.
     getSharedAudioQueue().unlock();
+    initAudio();
     // Encode the chosen model into the join name so it syncs to every client
     // (no server schema change needed — see net/playerModel).
     driverRef.current.join(encodeName(name, selectedModel()));
@@ -841,6 +973,16 @@ export function MultiplayerGame() {
         <Sky sunPosition={[60, 18, 40]} turbidity={3} rayleigh={3} mieCoefficient={0.005} mieDirectionalG={0.7} />
         <hemisphereLight args={["#bcd4e6", "#5a4633", 0.9]} />
         <directionalLight position={[60, 18, 40]} intensity={2.2} />
+        {/* Image-based lighting — THE reason single-player looks bright and MP
+            looked "black and dark": the arena GLB is PBR (meshStandardMaterial),
+            which renders near-black with no environment map to reflect. Same
+            preset single-player uses. Isolated Suspense so a slow/blocked CDN
+            fetch can't blank the scene (the lights above still light it). No
+            shadow maps here — that's the GPU-heavy part we keep off for the two
+            MediaPipe contexts; the env map alone is cheap and fixes the dark. */}
+        <Suspense fallback={null}>
+          <Environment preset="city" />
+        </Suspense>
         <Suspense fallback={null}>
           <group ref={arenaRef}>
             <Arena />
@@ -867,11 +1009,12 @@ export function MultiplayerGame() {
               <FpvArms />
             </AssetBoundary>
           ) : null}
+          {joined && localPlayer?.alive ? <MuzzleFlash flash={fireFlash} /> : null}
         </Suspense>
         <CamRig localPlayer={localPlayer} />
         {joined ? (
           <>
-            <VisionInputBridge driver={driver} localPlayer={localPlayer} players={players} arenaRef={arenaRef} />
+            <VisionInputBridge driver={driver} localPlayer={localPlayer} players={players} arenaRef={arenaRef} fireFlash={fireFlash} />
             {/* Keyboard/mouse fallback — writes the SAME useControls store the
                 webcam does, so testing without a camera still works. */}
             <InputController />

@@ -85,7 +85,6 @@ function Scene() {
     <>
       {/* Same look as the studio map: sky-blue bg + fog + sun */}
       <color attach="background" args={["#bcd4e6"]} />
-      <fog attach="fog" args={["#bcd4e6", 60, 220]} />
       <Sky sunPosition={[60, 18, 40]} turbidity={3} rayleigh={3} mieCoefficient={0.005} mieDirectionalG={0.7} />
       <hemisphereLight args={["#bcd4e6", "#5a4633", 0.9]} />
       <directionalLight
@@ -112,7 +111,8 @@ function Scene() {
             settles instantly instead of free-falling several metres. */}
         {/* Spawn on the real plaza ground (~y -7, per the studio's dialed-in stand
             point), capsule centre a bit above so it settles instead of falling. */}
-        <PlayerController spawn={[10, -6, -6]} />
+        {/* Exact spot the studio proved is solid ground (char stood at y -7). */}
+        <PlayerController spawn={[12, -6, -9.5]} />
         <Weapon />
         <Bots count={3} />
         <Vfx />

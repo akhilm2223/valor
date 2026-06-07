@@ -34,12 +34,16 @@ import {
 } from "spacetimedb";
 
 // Import all reducer arg schemas
+import CastGoldenVoteReducer from "./cast_golden_vote_reducer";
 import CasterInputReducer from "./caster_input_reducer";
 import FireReducer from "./fire_reducer";
 import JoinReducer from "./join_reducer";
 import ResetMatchReducer from "./reset_match_reducer";
 import SetReadyReducer from "./set_ready_reducer";
 import SetTeamReducer from "./set_team_reducer";
+import SpectatorJoinReducer from "./spectator_join_reducer";
+import SpectatorLeaveReducer from "./spectator_leave_reducer";
+import StartGoldenVoteReducer from "./start_golden_vote_reducer";
 import StartRoundReducer from "./start_round_reducer";
 import SubmitInputReducer from "./submit_input_reducer";
 
@@ -48,6 +52,7 @@ import SubmitInputReducer from "./submit_input_reducer";
 // Import all table schema definitions
 import CommentaryRow from "./commentary_table";
 import GameMatchRow from "./game_match_table";
+import GoldenVotesRow from "./golden_votes_table";
 import LeaderboardRow from "./leaderboard_table";
 import PlayersRow from "./players_table";
 import ShotsRow from "./shots_table";
@@ -79,6 +84,17 @@ const tablesSchema = __schema({
       { name: 'game_match_id_key', constraint: 'unique', columns: ['id'] },
     ],
   }, GameMatchRow),
+  golden_votes: __table({
+    name: 'golden_votes',
+    indexes: [
+      { accessor: 'voter_identity', name: 'golden_votes_voter_identity_idx_btree', algorithm: 'btree', columns: [
+        'voterIdentity',
+      ] },
+    ],
+    constraints: [
+      { name: 'golden_votes_voter_identity_key', constraint: 'unique', columns: ['voterIdentity'] },
+    ],
+  }, GoldenVotesRow),
   leaderboard: __table({
     name: 'leaderboard',
     indexes: [
@@ -131,12 +147,16 @@ const tablesSchema = __schema({
 
 /** The schema information for all reducers in this module. This is defined the same way as the reducers would have been defined in the server, except the body of the reducer is omitted in code generation. */
 const reducersSchema = __reducers(
+  __reducerSchema("cast_golden_vote", CastGoldenVoteReducer),
   __reducerSchema("caster_input", CasterInputReducer),
   __reducerSchema("fire", FireReducer),
   __reducerSchema("join", JoinReducer),
   __reducerSchema("reset_match", ResetMatchReducer),
   __reducerSchema("set_ready", SetReadyReducer),
   __reducerSchema("set_team", SetTeamReducer),
+  __reducerSchema("spectator_join", SpectatorJoinReducer),
+  __reducerSchema("spectator_leave", SpectatorLeaveReducer),
+  __reducerSchema("start_golden_vote", StartGoldenVoteReducer),
   __reducerSchema("start_round", StartRoundReducer),
   __reducerSchema("submit_input", SubmitInputReducer),
 );

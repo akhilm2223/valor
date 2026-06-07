@@ -40,4 +40,5 @@ export default __t.row({
   kills: __t.u32(),
   deaths: __t.u32(),
   ready: __t.bool(),
+  hasGoldenGun: __t.bool().name("has_golden_gun"),
 });

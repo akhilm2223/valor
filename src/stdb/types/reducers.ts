@@ -6,21 +6,29 @@
 import { type Infer as __Infer } from "spacetimedb";
 
 // Import all reducer arg schemas
+import CastGoldenVoteReducer from "../cast_golden_vote_reducer";
 import CasterInputReducer from "../caster_input_reducer";
 import FireReducer from "../fire_reducer";
 import JoinReducer from "../join_reducer";
 import ResetMatchReducer from "../reset_match_reducer";
 import SetReadyReducer from "../set_ready_reducer";
 import SetTeamReducer from "../set_team_reducer";
+import SpectatorJoinReducer from "../spectator_join_reducer";
+import SpectatorLeaveReducer from "../spectator_leave_reducer";
+import StartGoldenVoteReducer from "../start_golden_vote_reducer";
 import StartRoundReducer from "../start_round_reducer";
 import SubmitInputReducer from "../submit_input_reducer";
 
+export type CastGoldenVoteParams = __Infer<typeof CastGoldenVoteReducer>;
 export type CasterInputParams = __Infer<typeof CasterInputReducer>;
 export type FireParams = __Infer<typeof FireReducer>;
 export type JoinParams = __Infer<typeof JoinReducer>;
 export type ResetMatchParams = __Infer<typeof ResetMatchReducer>;
 export type SetReadyParams = __Infer<typeof SetReadyReducer>;
 export type SetTeamParams = __Infer<typeof SetTeamReducer>;
+export type SpectatorJoinParams = __Infer<typeof SpectatorJoinReducer>;
+export type SpectatorLeaveParams = __Infer<typeof SpectatorLeaveReducer>;
+export type StartGoldenVoteParams = __Infer<typeof StartGoldenVoteReducer>;
 export type StartRoundParams = __Infer<typeof StartRoundReducer>;
 export type SubmitInputParams = __Infer<typeof SubmitInputReducer>;
 

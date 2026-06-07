@@ -477,9 +477,12 @@ pub fn fire(ctx: &ReducerContext, aim_vector: Vec3) {
     if let Some((vid, _)) = best {
         hit = true;
         victim_id = Some(vid);
-        damage = SHOT_DAMAGE;
         if let Some(victim) = ctx.db.players().id().find(vid) {
-            let new_health = victim.health.saturating_sub(SHOT_DAMAGE);
+            // Golden Gun (spectator-voted reward): an armed shooter one-shots the
+            // victim regardless of remaining HP. Otherwise standard damage.
+            let dmg = if shooter.has_golden_gun { victim.health } else { SHOT_DAMAGE };
+            damage = dmg;
+            let new_health = victim.health.saturating_sub(dmg);
             let now_alive = new_health > 0;
             killed = !now_alive;
             ctx.db.players().id().update(Player {

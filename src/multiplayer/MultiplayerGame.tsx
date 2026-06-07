@@ -402,7 +402,7 @@ function ContextRecovery() {
 const HEAD_OFFSET_Y = 1.35; // server shooter ray origin (server/src/lib.rs)
 const CENTER_OFFSET_Y = 0.9; // server victim center = position.y + PLAYER_HEIGHT*0.5
 const ASSIST_RANGE = 60; // m — matches server MAX_RANGE
-const ASSIST_COS = Math.cos((25 * Math.PI) / 180); // generous cone (body-aim is coarse)
+const ASSIST_COS = Math.cos((14 * Math.PI) / 180); // narrower cone = less aggressive auto-aim
 const DOWN = new Vector3(0, -1, 0); // ground-snap raycast direction
 
 /** Wrap an angle into (-π, π] so accumulated yaw never drifts unbounded. */

@@ -25,6 +25,7 @@ import {
   type GameMatch,
   type Shot,
   type LeaderboardRow,
+  type GoldenVote,
 } from "./Connection";
 
 export type ConnStatus = "connecting" | "ready" | "error";
@@ -284,4 +285,73 @@ export function useLeaderboardRows(
     };
   }, [conn, limit]);
   return rows;
+}
+
+/**
+ * Derived view of the Golden Gun vote for the spectator/broadcast overlays.
+ * Combines the singleton `game_match` vote fields (state/deadline/winner — they
+ * come in via `useGameMatch`, passed in as `match`) with a live tally over the
+ * `golden_votes` table. Read-only: the UI casts votes by calling
+ * `conn.reducers.castGoldenVote` / `startGoldenVote` directly.
+ *
+ *   • `state`           — "Idle" | "Voting" | "Reveal" (from GoldenVoteState.tag)
+ *   • `endsAtMs`        — wall-clock ms when the current phase ends (server stores
+ *                         micros-since-epoch; we divide to ms for Date math)
+ *   • `winnerId`        — player id awarded the gun (0 / meaningless unless Reveal)
+ *   • `tally`           — playerId → vote count
+ *   • `totalVotes`      — number of votes cast this cycle
+ *   • `myVoteTargetId`  — the player THIS identity voted for, or null
+ */
+export interface GoldenVoteView {
+  state: "Idle" | "Voting" | "Reveal";
+  endsAtMs: number;
+  winnerId: number;
+  tally: Map<number, number>;
+  totalVotes: number;
+  myVoteTargetId: number | null;
+}
+
+export function useGoldenVote(
+  conn: ValorConnection | null,
+  identity: Identity | null,
+  match: GameMatch | undefined,
+): GoldenVoteView {
+  const [votes, setVotes] = useState<GoldenVote[]>([]);
+  useEffect(() => {
+    if (!conn) return;
+    const refresh = () => {
+      const all: GoldenVote[] = [];
+      for (const v of conn.db.golden_votes.iter()) all.push(v);
+      setVotes(all);
+    };
+    refresh();
+    const onAny = () => refresh();
+    conn.db.golden_votes.onInsert(onAny);
+    conn.db.golden_votes.onUpdate(onAny);
+    conn.db.golden_votes.onDelete(onAny);
+    return () => {
+      conn.db.golden_votes.removeOnInsert(onAny);
+      conn.db.golden_votes.removeOnUpdate(onAny);
+      conn.db.golden_votes.removeOnDelete(onAny);
+    };
+  }, [conn]);
+
+  const tally = new Map<number, number>();
+  let myVoteTargetId: number | null = null;
+  for (const v of votes) {
+    tally.set(v.targetPlayerId, (tally.get(v.targetPlayerId) ?? 0) + 1);
+    if (identity && v.voterIdentity.isEqual(identity)) {
+      myVoteTargetId = v.targetPlayerId;
+    }
+  }
+
+  const state = (match?.goldenVoteState?.tag ?? "Idle") as GoldenVoteView["state"];
+  return {
+    state,
+    endsAtMs: match ? Number(match.goldenVoteEndsAt) / 1000 : 0,
+    winnerId: match?.goldenVoteWinnerId ?? 0,
+    tally,
+    totalVotes: votes.length,
+    myVoteTargetId,
+  };
 }

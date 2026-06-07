@@ -1,6 +1,6 @@
 import { Identity } from "spacetimedb";
 import { DbConnection } from "../stdb";
-import type { Player, GameMatch, Shot, Commentary, LeaderboardRow } from "../stdb/types";
+import type { Player, GameMatch, Shot, Commentary, LeaderboardRow, Spectator, GoldenVote } from "../stdb/types";
 
 /**
  * Thin wrapper around the generated SpacetimeDB client. Owns:
@@ -36,6 +36,8 @@ const DEFAULT_QUERIES = [
   "SELECT * FROM shots",
   "SELECT * FROM commentary",
   "SELECT * FROM leaderboard",
+  "SELECT * FROM spectators",
+  "SELECT * FROM golden_votes",
 ];
 
 export function connectValor(opts: ConnectOpts = {}): ValorConnection {
@@ -64,4 +66,4 @@ export function resetValorIdentity(): void {
 }
 
 // Re-export the row types so callers can `import { Player } from "../net/Connection"`.
-export type { Player, GameMatch, Shot, Commentary, LeaderboardRow };
+export type { Player, GameMatch, Shot, Commentary, LeaderboardRow, Spectator, GoldenVote };

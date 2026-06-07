@@ -27,7 +27,7 @@ const SOUND_URLS = {
   reload: "/Sounds/dragon-studio-gun-reload-511309.mp3",
   walk: "/Sounds/u_3x9ga8wevj-walking-sound-effect-272246.mp3",
   hit: "/Sounds/hitmarker_2.mp3",
-  scream: "/Sounds/wilhelm-scream.mp3",
+  scream: "/Sounds/wilhelm-scream.wav",
 } as const;
 
 export type SfxName = keyof typeof SOUND_URLS;
@@ -92,32 +92,31 @@ export function initAudio() {
   if (S.ctx.state === "suspended") void S.ctx.resume();
 }
 
+/** Fetch + decode ONE clip into the cache (idempotent). Returns the buffer. */
+async function loadOne(name: SfxName): Promise<AudioBuffer | null> {
+  if (!S.ctx) return null;
+  if (S.buffers[name]) return S.buffers[name]!;
+  try {
+    const res = await fetch(encodeURI(SOUND_URLS[name]));
+    const arr = await res.arrayBuffer();
+    const buf = await S.ctx.decodeAudioData(arr);
+    S.buffers[name] = buf;
+    return buf;
+  } catch (e) {
+    console.warn(`[sfx] failed to load ${name}`, e); // non-fatal: clip just won't play
+    return null;
+  }
+}
+
 async function loadAll() {
   if (S.loading || !S.ctx) return;
   S.loading = true;
-  await Promise.all(
-    (Object.keys(SOUND_URLS) as SfxName[]).map(async (name) => {
-      try {
-        const res = await fetch(encodeURI(SOUND_URLS[name]));
-        const arr = await res.arrayBuffer();
-        S.buffers[name] = await S.ctx!.decodeAudioData(arr);
-      } catch (e) {
-        console.warn(`[sfx] failed to load ${name}`, e); // non-fatal: clip just won't play
-      }
-    }),
-  );
+  await Promise.all((Object.keys(SOUND_URLS) as SfxName[]).map(loadOne));
   if (S.walkWanted) startWalk(); // requested before the buffer was ready
 }
 
-/** Play a one-shot (overlapping). No-op until audio is unlocked + loaded. */
-export function playSfx(name: SfxName, volume = 1) {
-  // Dev diagnostic: log the death scream + any sound that can't play yet.
-  if (import.meta.env.DEV && (name === "scream" || !S.ctx || !S.buffers[name])) {
-    console.log(`[sfx] ${name} | ctx=${S.ctx?.state ?? "none"} buf=${!!S.buffers[name]}`);
-  }
+function startSource(name: SfxName, buf: AudioBuffer, volume: number) {
   if (!S.ctx || !S.master) return;
-  const buf = S.buffers[name];
-  if (!buf) return;
   const src = S.ctx.createBufferSource();
   src.buffer = buf;
   const g = S.ctx.createGain();
@@ -136,6 +135,25 @@ export function playSfx(name: SfxName, volume = 1) {
     src.start(0, 0, dur);
   } else {
     src.start();
+  }
+}
+
+/** Play a one-shot (overlapping). If the clip isn't decoded yet (initial load
+ *  missed/slow/failed), load it on demand and play when ready — so a sound can
+ *  never be permanently silent just because it wasn't in the first batch. */
+export function playSfx(name: SfxName, volume = 1) {
+  // Dev diagnostic: log the death scream + any sound that can't play immediately.
+  if (import.meta.env.DEV && (name === "scream" || !S.ctx || !S.buffers[name])) {
+    console.log(`[sfx] ${name} | ctx=${S.ctx?.state ?? "none"} buf=${!!S.buffers[name]}`);
+  }
+  if (!S.ctx || !S.master) return;
+  const buf = S.buffers[name];
+  if (buf) {
+    startSource(name, buf, volume);
+  } else {
+    void loadOne(name).then((b) => {
+      if (b) startSource(name, b, volume);
+    });
   }
 }
 

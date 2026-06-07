@@ -13,6 +13,8 @@ const PLAYER_RADIUS: f32 = 0.35; // capsule radius for raycast
 const PLAYER_HEIGHT: f32 = 1.8;
 const HEAD_OFFSET_Y: f32 = 1.35; // raycast origin above feet (matches client muzzle)
 
+const MAX_PLAYERS: usize = 4; // 2v2 cap; extra joiners become spectators
+const WORLD_HALF: f32 = 40.0; // play stays within ±40 on X/Z (the carved plaza)
 const MAX_HEALTH: u8 = 100;
 const SHOT_DAMAGE: u8 = 34; // 3-shot kill, leaves room for hit-feel tuning
 const MAG_SIZE: u8 = 12;
@@ -101,6 +103,12 @@ pub struct Player {
     pub anim_state: AnimState,
     // Cumulative match kills for this player. Drives leaderboard team_a/b_kills.
     pub kills: u32,
+    // Cumulative deaths this match (scoreboard K/D).
+    pub deaths: u32,
+    // Lobby ready-up gate: the match only starts once every connected player is
+    // ready (and both teams have ≥1). Reset to false on (re)join and on return
+    // to Lobby.
+    pub ready: bool,
 }
 
 // Singleton: id is always 0
@@ -129,6 +137,9 @@ pub struct Shot {
     pub hit: bool,
     pub victim_id: Option<u32>,
     pub damage: u8,
+    // True ONLY on the fatal shot. The kill feed + caster key off this so a
+    // 3-hit kill counts once, not three times ("dying multiple times").
+    pub killed: bool,
     pub fired_at: Timestamp,
 }
 
@@ -204,7 +215,8 @@ pub fn init(ctx: &ReducerContext) {
 pub fn join(ctx: &ReducerContext, name: String) {
     let me = ctx.sender();
 
-    // If this identity already has a Player row, just update the name + revive.
+    // Existing identity (reconnect / re-join from the lobby) → revive in place,
+    // clear ready so they must ready-up again. No duplicate row, no team change.
     if let Some(p) = ctx.db.players().identity().find(me) {
         let team = p.team;
         ctx.db.players().id().update(Player {
@@ -214,14 +226,30 @@ pub fn join(ctx: &ReducerContext, name: String) {
             ammo: MAG_SIZE,
             position: team_spawn(team),
             aim_vector: team_aim(team),
+            ready: false,
             ..p
         });
+        // No longer a spectator if they were one.
+        ctx.db.spectators().identity().delete(me);
         return;
     }
 
-    // Auto-balance: count alive members per team, place on smaller side.
-    let (a, b) = team_counts(ctx);
-    let team = if a <= b { 0 } else { 1 };
+    // 2v2 CAP: once the match is full, extra joiners become spectators (a row in
+    // the spectators table) rather than a 5th fighter. They can watch; no Player
+    // row means the client shows the spectator view.
+    let (mut total_a, mut total_b) = (0u32, 0u32);
+    for p in ctx.db.players().iter() {
+        if p.team == 0 { total_a += 1 } else { total_b += 1 }
+    }
+    if (total_a + total_b) as usize >= MAX_PLAYERS {
+        if ctx.db.spectators().identity().find(me).is_none() {
+            ctx.db.spectators().insert(Spectator { identity: me, joined_at: ctx.timestamp });
+        }
+        return;
+    }
+
+    // Auto-balance onto the smaller side (no team picking).
+    let team = if total_a <= total_b { 0 } else { 1 };
 
     ctx.db.players().insert(Player {
         id: 0,
@@ -237,7 +265,26 @@ pub fn join(ctx: &ReducerContext, name: String) {
         alive: true,
         anim_state: AnimState::Idle,
         kills: 0,
+        deaths: 0,
+        ready: false,
     });
+}
+
+// =============================================================================
+// set_ready — lobby ready-up. The match starts only when every connected player
+// is ready and both teams have ≥1 (see the tick Lobby branch). Lobby only.
+// =============================================================================
+
+#[spacetimedb::reducer]
+pub fn set_ready(ctx: &ReducerContext, ready: bool) {
+    let me = ctx.sender();
+    let Some(m) = ctx.db.game_match().id().find(0) else { return };
+    if m.state != MatchState::Lobby {
+        return; // can only toggle ready in the lobby
+    }
+    if let Some(p) = ctx.db.players().identity().find(me) {
+        ctx.db.players().id().update(Player { ready, ..p });
+    }
 }
 
 // =============================================================================
@@ -295,6 +342,12 @@ pub fn submit_input(
 #[spacetimedb::reducer]
 pub fn fire(ctx: &ReducerContext, aim_vector: Vec3) {
     let me = ctx.sender();
+    // LIVE only — no shooting in the lobby, countdown, or between rounds, so the
+    // round boundaries are crisp and a stray shot can't damage anyone off-clock.
+    let Some(m) = ctx.db.game_match().id().find(0) else { return };
+    if m.state != MatchState::Live {
+        return;
+    }
     let Some(shooter) = ctx.db.players().identity().find(me) else { return };
     if !shooter.alive || shooter.ammo == 0 {
         return;
@@ -315,56 +368,55 @@ pub fn fire(ctx: &ReducerContext, aim_vector: Vec3) {
     };
 
     // Raycast: find nearest hit among enemies (different team, alive, in range).
+    // Sample THREE spheres up the body (feet / torso / head) so a body-aim shot
+    // that lands a little high or low still connects — a single torso sphere made
+    // hits feel like misses.
     let mut best: Option<(u32, f32)> = None; // (victim_id, distance)
     for victim in ctx.db.players().iter() {
         if victim.id == shooter.id || victim.team == shooter.team || !victim.alive {
             continue;
         }
-        let center = Vec3 {
-            x: victim.position.x,
-            y: victim.position.y + PLAYER_HEIGHT * 0.5,
-            z: victim.position.z,
-        };
-        if let Some(t) = ray_sphere(origin, dir, center, PLAYER_RADIUS * 1.5) {
-            if t <= MAX_RANGE && best.map_or(true, |(_, bt)| t < bt) {
-                best = Some((victim.id, t));
+        for band in [0.4f32, PLAYER_HEIGHT * 0.5, PLAYER_HEIGHT * 0.92] {
+            let center = Vec3 {
+                x: victim.position.x,
+                y: victim.position.y + band,
+                z: victim.position.z,
+            };
+            if let Some(t) = ray_sphere(origin, dir, center, PLAYER_RADIUS * 1.4) {
+                if t <= MAX_RANGE && best.map_or(true, |(_, bt)| t < bt) {
+                    best = Some((victim.id, t));
+                }
             }
         }
     }
 
-    let (hit, victim_id, damage) = match best {
-        Some((vid, _)) => (true, Some(vid), SHOT_DAMAGE),
-        None => (false, None, 0),
-    };
-
-    ctx.db.shots().insert(Shot {
-        id: 0,
-        shooter_id: shooter.id,
-        aim_vector: dir,
-        hit,
-        victim_id,
-        damage,
-        fired_at: ctx.timestamp,
-    });
-
-    if let Some(vid) = victim_id {
+    // Apply damage and decide `killed` BEFORE inserting the shot, so the kill feed
+    // can key off the one fatal shot instead of every hit.
+    let mut hit = false;
+    let mut victim_id: Option<u32> = None;
+    let mut damage = 0u8;
+    let mut killed = false;
+    if let Some((vid, _)) = best {
+        hit = true;
+        victim_id = Some(vid);
+        damage = SHOT_DAMAGE;
         if let Some(victim) = ctx.db.players().id().find(vid) {
-            let new_health = victim.health.saturating_sub(damage);
+            let new_health = victim.health.saturating_sub(SHOT_DAMAGE);
             let now_alive = new_health > 0;
+            killed = !now_alive;
             ctx.db.players().id().update(Player {
                 health: new_health,
                 alive: now_alive,
+                deaths: if killed { victim.deaths.saturating_add(1) } else { victim.deaths },
                 anim_state: if now_alive { AnimState::Hit } else { AnimState::Death },
                 ..victim.clone()
             });
-
-            if !now_alive {
-                // Credit the shooter with a kill. Re-fetch in case ammo update above
-                // already moved the row's stored version forward.
+            if killed {
+                // Credit the shooter with the kill (re-fetch: the ammo update above
+                // already advanced this row's stored version).
                 if let Some(s) = ctx.db.players().id().find(shooter.id) {
-                    let new_kills = s.kills.saturating_add(1);
                     ctx.db.players().id().update(Player {
-                        kills: new_kills,
+                        kills: s.kills.saturating_add(1),
                         ..s
                     });
                 }
@@ -377,6 +429,17 @@ pub fn fire(ctx: &ReducerContext, aim_vector: Vec3) {
             }
         }
     }
+
+    ctx.db.shots().insert(Shot {
+        id: 0,
+        shooter_id: shooter.id,
+        aim_vector: dir,
+        hit,
+        victim_id,
+        damage,
+        killed,
+        fired_at: ctx.timestamp,
+    });
 }
 
 // =============================================================================
@@ -391,33 +454,35 @@ pub fn fire(ctx: &ReducerContext, aim_vector: Vec3) {
 
 #[spacetimedb::reducer]
 pub fn tick(ctx: &ReducerContext, _arg: TickSchedule) {
-    // Integrate movement for every alive player.
-    let players: Vec<Player> = ctx.db.players().iter().filter(|p| p.alive).collect();
-    for p in players {
-        if p.lean.x == 0.0 && p.lean.z == 0.0 {
-            continue;
-        }
-        let speed = if p.crouch { CROUCH_SPEED } else { MOVE_SPEED };
-        let dx = p.lean.x * speed * TICK_DT;
-        let dz = p.lean.z * speed * TICK_DT;
-        let new_pos = Vec3 {
-            x: p.position.x + dx,
-            y: p.position.y,
-            z: p.position.z + dz,
-        };
-        ctx.db.players().id().update(Player {
-            position: new_pos,
-            ..p
-        });
-    }
-
     let Some(m) = ctx.db.game_match().id().find(0) else { return };
+
+    // Integrate movement ONLY while Live. Frozen in lobby / between rounds so the
+    // round boundaries are crisp and players don't wander the arena pre-fight.
+    if m.state == MatchState::Live {
+        let players: Vec<Player> = ctx.db.players().iter().filter(|p| p.alive).collect();
+        for p in players {
+            if p.lean.x == 0.0 && p.lean.z == 0.0 {
+                continue;
+            }
+            let speed = if p.crouch { CROUCH_SPEED } else { MOVE_SPEED };
+            let dx = p.lean.x * speed * TICK_DT;
+            let dz = p.lean.z * speed * TICK_DT;
+            // Clamp to the plaza so nobody slides into the void (r≈40 keeps play
+            // on the carved arena).
+            let nx = (p.position.x + dx).clamp(-WORLD_HALF, WORLD_HALF);
+            let nz = (p.position.z + dz).clamp(-WORLD_HALF, WORLD_HALF);
+            ctx.db.players().id().update(Player {
+                position: Vec3 { x: nx, y: p.position.y, z: nz },
+                ..p
+            });
+        }
+    }
 
     match m.state {
         MatchState::Lobby => {
-            // Auto-start a round once both teams have at least one live player.
+            // Start only when BOTH teams have a player AND everyone has readied up.
             let (a_alive, b_alive) = team_counts(ctx);
-            if a_alive >= 1 && b_alive >= 1 {
+            if a_alive >= 1 && b_alive >= 1 && all_ready(ctx) {
                 start_round_impl(ctx);
             }
         }
@@ -517,6 +582,8 @@ fn reset_match_impl(ctx: &ReducerContext) {
             alive: true,
             anim_state: AnimState::Idle,
             kills: 0,
+            deaths: 0,
+            ready: false, // back in the lobby → must ready up again
             ..p
         });
     }
@@ -618,6 +685,8 @@ pub fn on_disconnect(ctx: &ReducerContext) {
     if let Some(p) = ctx.db.players().identity().find(me) {
         ctx.db.players().id().delete(p.id);
     }
+    // Also drop them from the spectator table if they were watching.
+    ctx.db.spectators().identity().delete(me);
 
     // Lobby rule: a 1v1 needs BOTH sides present. If someone leaves while a match
     // is in progress, abort it and drop back to a fresh Lobby — a quit/refresh is
@@ -667,6 +736,19 @@ fn team_counts(ctx: &ReducerContext) -> (u32, u32) {
         if p.team == 0 { a += 1 } else { b += 1 }
     }
     (a, b)
+}
+
+// True when there is at least one player and EVERY player has readied up — the
+// gate for Lobby → first round.
+fn all_ready(ctx: &ReducerContext) -> bool {
+    let mut any = false;
+    for p in ctx.db.players().iter() {
+        any = true;
+        if !p.ready {
+            return false;
+        }
+    }
+    any
 }
 
 fn normalize(v: Vec3) -> Vec3 {

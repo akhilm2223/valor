@@ -9,7 +9,7 @@ name: Build server wasm
 
 on:
   push:
-    branches: [server-lobby-fix]
+    branches: [main, server-lobby-fix]
     paths:
       - "server/**"
       - ".github/workflows/build-server.yml"

@@ -1,84 +1,188 @@
 // ─────────────────────────────────────────────────────────────────────────
-// aimAssist.ts — the shared aim-assist TARGET LOCK.
+// aimAssist.ts — aim-assist TARGET LOCK + safe look aid.
 //
-// Body control can't aim finely, so the game picks WHAT you'll shoot for you and
-// shows it (the red ring — see TargetLock). The lock is the enemy nearest your
-// crosshair that you have line-of-sight to, with light STICKINESS so it doesn't
-// flicker between clustered enemies:
+// WHY THE OLD SYSTEM SPUN 360° (root causes, not symptoms):
+//   1. Magnetism wrote yawDelta in useFrame while PlayerController consumed
+//      yawDelta in the physics step — two loops, different rates, fighting.
+//   2. Yaw error was computed from XZ projection only, ignoring pitch. With
+//      any vertical offset the "yaw fix" pointed the long way around the
+//      circle instead of the short path → perpetual horizontal spin.
+//   3. No per-frame cap — a persistent ~π error produced full rotations
+//      every frame trying to reach a target that needed pitch, not yaw.
+//   4. Assist ran during lock "grace" frames toward a stale off-screen point
+//      while the lock was already invalid → runaway correction.
 //
-//   • ACQUIRE: when unlocked, grab the most-aligned visible enemy within a tight
-//     cone (ACQUIRE°). This is "what's under the crosshair".
-//   • KEEP: once locked, hold that target until it dies, loses line-of-sight, or
-//     leaves a WIDER cone (KEEP°) — i.e. until you deliberately turn away. So a
-//     small twitch won't swap targets, but turning to the next enemy will.
-//
-// Line of sight is proven by a raycast that must hit an ENEMY first (a wall in
-// the way blocks it). updateLock() runs every frame (TargetLock); getLock() is
-// read by the ring renderer AND Weapon.fire() (which re-confirms LOS on the shot).
+// FIX: lock picking stays here; look aid runs in PlayerController's physics
+// step, applied DIRECTLY to yaw/pitch (never via yawDelta). Aid only when
+// the lock is stable (not in grace), total 3D error < 18°, and each step is
+// capped at 2° so it can fine-tune but never orbit.
 // ─────────────────────────────────────────────────────────────────────────
 
+import { MathUtils } from "three";
 import { LOCAL_ID, type Vec3 } from "./contracts";
 import { transforms, useGame } from "./stores";
 import { raycastShot } from "./hitscan";
 
-const ACQUIRE_COS = Math.cos((13 * Math.PI) / 180); // tight cone to LOCK a new target
-const KEEP_COS = Math.cos((22 * Math.PI) / 180); // wider cone to HOLD the current one
-const ASSIST_RANGE = 90; // m
+const ACQUIRE_COS = Math.cos((8 * Math.PI) / 180);
+const KEEP_COS = Math.cos((22 * Math.PI) / 180);
+const SWITCH_MARGIN = 1 - Math.cos((3 * Math.PI) / 180);
+const ASSIST_RANGE = 32;
+const LOSE_GRACE_FRAMES = 8;
+const HEAD_OFFSET = 0.7;
+
+// Look aid tunables (applied in PlayerController, not via yawDelta).
+const AIM_RATE = 4; // 1/s — gentle fine-tune only
+const DEADZONE = 0.003; // rad — stop nudging when essentially on target
+const MAX_ASSIST_ANGLE = MathUtils.degToRad(18); // beyond this, player turns manually
+const MAX_STEP = MathUtils.degToRad(2); // hard cap per physics step — prevents orbit
+const PITCH_LIMIT = MathUtils.degToRad(88);
 
 let lockId: string | null = null;
-let lockPoint: Vec3 | null = null; // current target's aim point (capsule centre)
+let lockPoint: Vec3 | null = null;
+let loseFrames = 0;
+let lockStable = false; // true only when eval succeeded THIS frame (not grace)
 
-/** Evaluate one entity: alignment to `aim` + LOS. Returns null if dead, out of
- *  range, or blocked (a ray toward it hits a wall / another body first). */
-function evalTarget(id: string, origin: Vec3, aim: Vec3): { cos: number; point: Vec3; hitId: string } | null {
+function wrapAngle(a: number): number {
+  const twoPi = Math.PI * 2;
+  let r = a % twoPi;
+  if (r > Math.PI) r -= twoPi;
+  else if (r <= -Math.PI) r += twoPi;
+  return r;
+}
+
+/** Forward unit vector from yaw/pitch — matches PlayerController YXZ convention. */
+function lookFrom(yaw: number, pitch: number): Vec3 {
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  const cy = Math.cos(yaw), sy = Math.sin(yaw);
+  return [-cp * sy, sp, -cp * cy];
+}
+
+/** Yaw/pitch that look along a world-space direction (|dir| > 0). */
+function yawPitchTo(dir: Vec3): { yaw: number; pitch: number } {
+  const len = Math.hypot(dir[0], dir[1], dir[2]);
+  if (len < 1e-6) return { yaw: 0, pitch: 0 };
+  const inv = 1 / len;
+  const dx = dir[0] * inv, dy = dir[1] * inv, dz = dir[2] * inv;
+  return { yaw: Math.atan2(-dx, -dz), pitch: Math.asin(MathUtils.clamp(dy, -1, 1)) };
+}
+
+function evalTarget(id: string, origin: Vec3, aim: Vec3): { cos: number; point: Vec3 } | null {
   const e = useGame.getState().entities[id];
   if (!e || !e.alive) return null;
   const t = transforms[id];
   if (!t) return null;
-  const px = t.pos[0], py = t.pos[1], pz = t.pos[2];
-  const dx = px - origin[0], dy = py - origin[1], dz = pz - origin[2];
-  const dist = Math.hypot(dx, dy, dz);
-  if (dist < 1e-3 || dist > ASSIST_RANGE) return null;
-  const inv = 1 / dist;
-  const dir: Vec3 = [dx * inv, dy * inv, dz * inv];
-  const cos = aim[0] * dir[0] + aim[1] * dir[1] + aim[2] * dir[2];
-  const hit = raycastShot(origin, dir, ASSIST_RANGE);
-  if (!hit || hit.kind !== "entity" || !hit.entityId || hit.entityId === LOCAL_ID) return null;
-  return { cos, point: [px, py, pz], hitId: hit.entityId };
+  const cx = t.pos[0], cy = t.pos[1], cz = t.pos[2];
+  const hx = cx, hy = cy + HEAD_OFFSET, hz = cz;
+  const tdx = hx - origin[0], tdy = hy - origin[1], tdz = hz - origin[2];
+  const tDist = Math.hypot(tdx, tdy, tdz);
+  if (tDist < 1e-3 || tDist > ASSIST_RANGE) return null;
+  const tInv = 1 / tDist;
+  const toHead: Vec3 = [tdx * tInv, tdy * tInv, tdz * tInv];
+  const cos = aim[0] * toHead[0] + aim[1] * toHead[1] + aim[2] * toHead[2];
+  const cdx = cx - origin[0], cdy = cy - origin[1], cdz = cz - origin[2];
+  const cDist = Math.hypot(cdx, cdy, cdz);
+  if (cDist < 1e-3) return null;
+  const cInv = 1 / cDist;
+  const toCenter: Vec3 = [cdx * cInv, cdy * cInv, cdz * cInv];
+  const hit = raycastShot(origin, toCenter, ASSIST_RANGE);
+  if (!hit || hit.kind !== "entity" || hit.entityId !== id) return null;
+  return { cos, point: [hx, hy, hz] };
 }
 
-/** Recompute the lock for this frame (sticky acquire/keep). */
 export function updateLock(origin: Vec3, aim: Vec3): void {
-  // Best visible enemy within the (tight) acquire cone.
+  const prevId = lockId;
+
+  if (lockId) {
+    const cur = evalTarget(lockId, origin, aim);
+    if (cur && cur.cos >= KEEP_COS) {
+      lockPoint = cur.point;
+      loseFrames = 0;
+      lockStable = true;
+      return;
+    }
+    loseFrames++;
+    lockStable = false; // grace: keep ring, but NO look aid toward stale point
+    if (loseFrames < LOSE_GRACE_FRAMES) return;
+  }
+
   let best: { id: string; cos: number; point: Vec3 } | null = null;
   for (const id in useGame.getState().entities) {
     if (id === LOCAL_ID) continue;
     const r = evalTarget(id, origin, aim);
     if (!r || r.cos < ACQUIRE_COS) continue;
-    if (!best || r.cos > best.cos) best = { id: r.hitId, cos: r.cos, point: r.point };
+    if (!best || r.cos > best.cos) best = { id, cos: r.cos, point: r.point };
   }
 
-  // Keep the current target if it's still visible and inside the wider keep cone,
-  // UNLESS a different enemy is now clearly more centered (acquire cone) — then
-  // hand off so turning toward someone new switches the lock.
-  if (lockId) {
-    const cur = evalTarget(lockId, origin, aim);
-    if (cur && cur.cos >= KEEP_COS) {
-      if (best && best.id !== lockId && best.cos > cur.cos) {
-        lockId = best.id; lockPoint = best.point; // a better-centered enemy won it
-      } else {
-        lockPoint = cur.point; // refresh the held target's position
-      }
+  if (best && prevId && prevId !== best.id) {
+    const prev = evalTarget(prevId, origin, aim);
+    if (prev && prev.cos >= ACQUIRE_COS && best.cos - prev.cos < SWITCH_MARGIN) {
+      lockId = prevId;
+      lockPoint = prev.point;
+      loseFrames = 0;
+      lockStable = true;
       return;
     }
   }
 
-  // Acquire the nearest-to-crosshair enemy, or clear if none.
-  if (best) { lockId = best.id; lockPoint = best.point; }
-  else { lockId = null; lockPoint = null; }
+  if (best) {
+    lockId = best.id;
+    lockPoint = best.point;
+    loseFrames = 0;
+    lockStable = true;
+  } else {
+    lockId = null;
+    lockPoint = null;
+    loseFrames = 0;
+    lockStable = false;
+  }
 }
 
-/** The currently locked target (id + aim point), or null. */
 export function getLock(): { id: string; point: Vec3 } | null {
   return lockId && lockPoint ? { id: lockId, point: lockPoint } : null;
+}
+
+/** True when the lock passed eval this frame (not in grace). Look aid gates on this. */
+export function isLockStable(): boolean {
+  return lockStable;
+}
+
+/** Fine-tune yaw/pitch toward the locked head. Call from PlayerController AFTER
+ *  input deltas are applied and updateLock() has run — never via yawDelta. */
+export function applyLookAssist(
+  yaw: number,
+  pitch: number,
+  eye: Vec3,
+  dt: number,
+): { yaw: number; pitch: number } {
+  const lock = getLock();
+  if (!lock || !lockStable) return { yaw, pitch };
+
+  const dx = lock.point[0] - eye[0];
+  const dy = lock.point[1] - eye[1];
+  const dz = lock.point[2] - eye[2];
+  const dist = Math.hypot(dx, dy, dz);
+  if (dist < 1e-3) return { yaw, pitch };
+
+  const aim = lookFrom(yaw, pitch);
+  const dot = (aim[0] * dx + aim[1] * dy + aim[2] * dz) / dist;
+  const angle = Math.acos(MathUtils.clamp(dot, -1, 1));
+
+  // Large error → don't spin the player around; they turn manually (fingers/mouse).
+  if (angle > MAX_ASSIST_ANGLE) return { yaw, pitch };
+
+  const { yaw: wantYaw, pitch: wantPitch } = yawPitchTo([dx, dy, dz]);
+  const yawErr = wrapAngle(wantYaw - yaw);
+  const pitchErr = wantPitch - pitch;
+
+  const k = 1 - Math.exp(-AIM_RATE * dt);
+  let yawStep = Math.abs(yawErr) > DEADZONE ? yawErr * k : 0;
+  let pitchStep = Math.abs(pitchErr) > DEADZONE ? pitchErr * k : 0;
+
+  yawStep = MathUtils.clamp(yawStep, -MAX_STEP, MAX_STEP);
+  pitchStep = MathUtils.clamp(pitchStep, -MAX_STEP, MAX_STEP);
+
+  return {
+    yaw: wrapAngle(yaw + yawStep),
+    pitch: MathUtils.clamp(pitch + pitchStep, -PITCH_LIMIT, PITCH_LIMIT),
+  };
 }

@@ -53,6 +53,7 @@ type KinematicCharacterController = ReturnType<
   ReturnType<typeof useRapier>["world"]["createCharacterController"]
 >;
 import { CAPSULE, LOCAL_ID, type Transform, type Vec3 } from "./contracts";
+import { applyLookAssist, updateLock } from "./aimAssist";
 import { makeEntity, makeTransform, transforms, useControls, useGame } from "./stores";
 
 // ── Tunables (movement research) ────────────────────────────────────────
@@ -162,12 +163,27 @@ export function PlayerController({ spawn = [0, 1.2, 6] as Vec3 }: { spawn?: Vec3
       return;
     }
 
-    // ── Look: consume + zero the deltas (we are their sole consumer) ─────
+    // ── Look: consume + zero input deltas (sole consumer of player input) ─
     yaw.current = wrapAngle(yaw.current - ctrl.yawDelta);
     pitch.current = MathUtils.clamp(pitch.current - ctrl.pitchDelta, -PITCH_LIMIT, PITCH_LIMIT);
     if (ctrl.yawDelta !== 0 || ctrl.pitchDelta !== 0) {
       useControls.setState({ yawDelta: 0, pitchDelta: 0 });
     }
+
+    // ── Aim assist: lock pick + gentle look fine-tune (same physics step) ─
+    // Runs HERE (not via yawDelta) so vision/mouse input and assist never
+    // fight across different loops. updateLock uses the post-input aim vector;
+    // applyLookAssist only nudges when the lock is stable and error is small.
+    const assistEyeH = MathUtils.lerp(CAPSULE.standEye, CAPSULE.crouchEye, crouchAmount.current);
+    const assistEyeY = here.y + (assistEyeH - (halfHeight.current + CAPSULE.radius));
+    const assistCp = Math.cos(pitch.current), assistSp = Math.sin(pitch.current);
+    const assistCy = Math.cos(yaw.current), assistSy = Math.sin(yaw.current);
+    const assistEye: Vec3 = [here.x, assistEyeY, here.z];
+    const assistAim: Vec3 = [-assistCp * assistSy, assistSp, -assistCp * assistCy];
+    updateLock(assistEye, assistAim);
+    const assisted = applyLookAssist(yaw.current, pitch.current, assistEye, dt);
+    yaw.current = assisted.yaw;
+    pitch.current = assisted.pitch;
 
     // ── Crouch lerp (half-height + 0..1 amount) ──────────────────────────
     const crouchTarget = ctrl.crouch ? 1 : 0;

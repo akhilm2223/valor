@@ -24,7 +24,7 @@
 import { Component, type ReactNode, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Sky, Environment } from "@react-three/drei";
-import { Raycaster, Vector3, MathUtils, BufferGeometry, Mesh as ThreeMesh, type Group, type PerspectiveCamera } from "three";
+import { Raycaster, Vector3, MathUtils, BufferGeometry, Mesh as ThreeMesh, AdditiveBlending, type Group, type PerspectiveCamera } from "three";
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from "three-mesh-bvh";
 import { Arena, FitModel } from "../Models";
 import { Scatter } from "../Scatter";
@@ -287,9 +287,13 @@ function RemotePlayerRig({
         animation={clipFor(player.animState)}
         castShadow
       />
-      {/* Identity glow — a colored light hugging the body (red = enemy, green =
-          ally) so sides read instantly. Short range so it doesn't wash the map. */}
-      <pointLight position={[0, 1.1, 0]} color={glowColor} intensity={enemy ? 5 : 2.5} distance={3.2} decay={2} />
+      {/* Identity glow — enemies blaze RED, allies green. A bright point light
+          lights the body + an additive haze sphere so they visibly glow. */}
+      <pointLight position={[0, 1.1, 0]} color={glowColor} intensity={enemy ? 14 : 4} distance={enemy ? 6 : 3.5} decay={2} />
+      <mesh position={[0, 1.05, 0]}>
+        <sphereGeometry args={[enemy ? 0.85 : 0.7, 16, 16]} />
+        <meshBasicMaterial color={glowColor} transparent opacity={enemy ? 0.32 : 0.16} blending={AdditiveBlending} depthWrite={false} toneMapped={false} />
+      </mesh>
       {/* Team ring — slightly above the ground so z-fighting with the arena */}
       {/* mesh doesn't strobe. Emissive so it reads in the fog. */}
       <mesh position={[0, 0.03, 0]} rotation={[-Math.PI / 2, 0, 0]}>
@@ -907,7 +911,8 @@ function Minimap({
       ref={ref}
       width={MINI_SIZE}
       height={MINI_SIZE}
-      style={{ position: "absolute", bottom: 16, left: 16, width: MINI_SIZE, height: MINI_SIZE, zIndex: 6, pointerEvents: "none" }}
+      // Sits ABOVE the bottom-left webcam feed so they don't overlap.
+      style={{ position: "absolute", bottom: 210, left: 16, width: MINI_SIZE, height: MINI_SIZE, zIndex: 6, pointerEvents: "none" }}
     />
   );
 }

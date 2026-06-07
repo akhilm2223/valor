@@ -19,6 +19,8 @@ const MAG_SIZE: u8 = 12;
 const MAX_RANGE: f32 = 60.0;
 
 const ROUND_LEN_MS: u64 = 75_000;
+const ROUND_END_COOLDOWN_MS: i64 = 5_000; // post-round pause before auto-restart
+const MATCH_LENGTH_ROUNDS: u32 = 5; // after this many rounds match ends (no auto-restart)
 
 // Team spawn points (Z separates A from B; arena is roughly XY square at y=0).
 const SPAWN_A: Vec3 = Vec3 { x: 0.0, y: 0.0, z: 8.0 };
@@ -93,6 +95,8 @@ pub struct Player {
     pub ammo: u8,
     pub alive: bool,
     pub anim_state: AnimState,
+    // Cumulative match kills for this player. Drives leaderboard team_a/b_kills.
+    pub kills: u32,
 }
 
 // Singleton: id is always 0
@@ -106,6 +110,9 @@ pub struct GameMatch {
     pub score_b: u32,
     pub round_timer_ms: u64,
     pub state: MatchState,
+    // When tick() flipped state to RoundEnd. tick() uses this for the 5s cooldown
+    // before auto-calling start_round() again. Init=epoch (=0 micros).
+    pub round_end_timestamp: Timestamp,
 }
 
 #[spacetimedb::table(accessor = shots, public)]
@@ -175,6 +182,7 @@ pub fn init(ctx: &ReducerContext) {
         score_b: 0,
         round_timer_ms: 0,
         state: MatchState::Lobby,
+        round_end_timestamp: Timestamp::from_micros_since_unix_epoch(0),
     });
 
     let interval = spacetimedb::TimeDuration::from_micros(33_000);
@@ -223,6 +231,7 @@ pub fn join(ctx: &ReducerContext, name: String) {
         ammo: MAG_SIZE,
         alive: true,
         anim_state: AnimState::Idle,
+        kills: 0,
     });
 }
 
@@ -345,6 +354,15 @@ pub fn fire(ctx: &ReducerContext, aim_vector: Vec3) {
             });
 
             if !now_alive {
+                // Credit the shooter with a kill. Re-fetch in case ammo update above
+                // already moved the row's stored version forward.
+                if let Some(s) = ctx.db.players().id().find(shooter.id) {
+                    let new_kills = s.kills.saturating_add(1);
+                    ctx.db.players().id().update(Player {
+                        kills: new_kills,
+                        ..s
+                    });
+                }
                 ctx.db.commentary().insert(Commentary {
                     id: 0,
                     kind: CommentaryKind::Bark,
@@ -357,7 +375,13 @@ pub fn fire(ctx: &ReducerContext, aim_vector: Vec3) {
 }
 
 // =============================================================================
-// tick — 30Hz: integrate movement from lean + advance round timer + win check.
+// tick — 30Hz: integrate movement + advance match state machine.
+//
+// State machine:
+//   Lobby     -> Live      auto when both teams have >=1 alive player
+//   Live      -> RoundEnd  on team wipe or timer == 0 (writes leaderboard row)
+//   RoundEnd  -> Live      auto after ROUND_END_COOLDOWN_MS (until MATCH_LENGTH)
+//   RoundEnd  -> MatchEnd  if round count reached MATCH_LENGTH_ROUNDS
 // =============================================================================
 
 #[spacetimedb::reducer]
@@ -382,48 +406,74 @@ pub fn tick(ctx: &ReducerContext, _arg: TickSchedule) {
         });
     }
 
-    // Advance the match clock when Live; evaluate win condition.
     let Some(m) = ctx.db.game_match().id().find(0) else { return };
-    if m.state != MatchState::Live {
-        return;
-    }
 
-    let new_timer = m.round_timer_ms.saturating_sub((TICK_DT * 1000.0) as u64);
-    let (a_alive, b_alive) = team_counts(ctx);
+    match m.state {
+        MatchState::Lobby => {
+            // Auto-start a round once both teams have at least one live player.
+            let (a_alive, b_alive) = team_counts(ctx);
+            if a_alive >= 1 && b_alive >= 1 {
+                start_round_impl(ctx);
+            }
+        }
+        MatchState::Live => {
+            let new_timer = m.round_timer_ms.saturating_sub((TICK_DT * 1000.0) as u64);
+            let (a_alive, b_alive) = team_counts(ctx);
 
-    if a_alive == 0 || b_alive == 0 || new_timer == 0 {
-        let winning_team = if a_alive > b_alive { 0 } else { 1 };
-        let (sa, sb) = (m.score_a, m.score_b);
-        ctx.db.game_match().id().update(GameMatch {
-            score_a: if winning_team == 0 { sa + 1 } else { sa },
-            score_b: if winning_team == 1 { sb + 1 } else { sb },
-            round_timer_ms: 0,
-            state: MatchState::RoundEnd,
-            ..m
-        });
-        ctx.db.leaderboard().insert(LeaderboardRow {
-            id: 0,
-            match_round: m.round,
-            winning_team,
-            team_a_kills: 0, // TODO: derive from shots in this round
-            team_b_kills: 0,
-            played_at: ctx.timestamp,
-        });
-    } else {
-        ctx.db.game_match().id().update(GameMatch {
-            round_timer_ms: new_timer,
-            ..m
-        });
+            if a_alive == 0 || b_alive == 0 || new_timer == 0 {
+                end_round(ctx, &m, a_alive, b_alive);
+            } else {
+                ctx.db.game_match().id().update(GameMatch {
+                    round_timer_ms: new_timer,
+                    ..m
+                });
+            }
+        }
+        MatchState::RoundEnd => {
+            // After ROUND_END_COOLDOWN_MS, auto-start the next round unless the
+            // match is over.
+            let elapsed_ms = ctx
+                .timestamp
+                .time_duration_since(m.round_end_timestamp)
+                .map(|d| d.to_micros() / 1_000)
+                .unwrap_or(0);
+            if elapsed_ms >= ROUND_END_COOLDOWN_MS {
+                if m.round >= MATCH_LENGTH_ROUNDS {
+                    ctx.db.game_match().id().update(GameMatch {
+                        state: MatchState::MatchEnd,
+                        ..m
+                    });
+                } else {
+                    start_round_impl(ctx);
+                }
+            }
+        }
+        MatchState::MatchEnd => {
+            // Terminal state. A future `reset_match` reducer can re-enter Lobby.
+        }
     }
 }
 
 // =============================================================================
-// Round control (called by host / lobby UI). Not in the auto tick loop yet.
+// Round control: `start_round` is the public reducer (idempotent — safe to call
+// even if already Live). It just delegates to start_round_impl. The tick auto
+// loop uses the same impl.
 // =============================================================================
 
 #[spacetimedb::reducer]
 pub fn start_round(ctx: &ReducerContext) {
+    start_round_impl(ctx);
+}
+
+fn start_round_impl(ctx: &ReducerContext) {
     let Some(m) = ctx.db.game_match().id().find(0) else { return };
+
+    // Idempotency: if we're already Live, do nothing. Lets the auto-trigger and
+    // the manual reducer coexist without double-incrementing the round counter.
+    if m.state == MatchState::Live {
+        return;
+    }
+
     // Respawn every player at their team spawn.
     let players: Vec<Player> = ctx.db.players().iter().collect();
     for p in players {
@@ -442,6 +492,41 @@ pub fn start_round(ctx: &ReducerContext) {
         round_timer_ms: ROUND_LEN_MS,
         state: MatchState::Live,
         ..m
+    });
+}
+
+// Win-condition write: pick winner, bump match score, snapshot kills per team
+// into a new `leaderboard` row, transition to RoundEnd.
+fn end_round(ctx: &ReducerContext, m: &GameMatch, a_alive: u32, b_alive: u32) {
+    let winning_team = if a_alive > b_alive { 0 } else { 1 };
+    let (sa, sb) = (m.score_a, m.score_b);
+
+    // Sum cumulative kills per team for the leaderboard snapshot.
+    let mut team_a_kills: u32 = 0;
+    let mut team_b_kills: u32 = 0;
+    for p in ctx.db.players().iter() {
+        if p.team == 0 {
+            team_a_kills = team_a_kills.saturating_add(p.kills);
+        } else {
+            team_b_kills = team_b_kills.saturating_add(p.kills);
+        }
+    }
+
+    ctx.db.game_match().id().update(GameMatch {
+        score_a: if winning_team == 0 { sa + 1 } else { sa },
+        score_b: if winning_team == 1 { sb + 1 } else { sb },
+        round_timer_ms: 0,
+        state: MatchState::RoundEnd,
+        round_end_timestamp: ctx.timestamp,
+        ..m.clone()
+    });
+    ctx.db.leaderboard().insert(LeaderboardRow {
+        id: 0,
+        match_round: m.round,
+        winning_team,
+        team_a_kills,
+        team_b_kills,
+        played_at: ctx.timestamp,
     });
 }
 

@@ -4,12 +4,14 @@ import { App } from "./App";
 import { Game } from "./game/GameScene";
 import { GameView } from "./game/GameView";
 import { CasterDemo } from "./caster/CasterDemo";
+import { Leaderboard } from "./ui/Leaderboard";
 
-// Four screens (studio stays the default, animation-only):
+// Five screens (studio stays the default, animation-only):
 //   /                  → Model Studio (App)
 //   /?game             → full FPS — movement/hitscan/combat/HUD/bots (GameScene)
 //   /?game2  or  /#game → Akhil's arena prototype (GameView)
 //   /#caster           → Tier 1 AI caster demo against mock kill stream
+//   /#leaderboard      → Phase 3 live leaderboard (recent rounds from SpacetimeDB)
 function Root() {
   // Track the hash so Akhil's #game link still works without a full reload.
   const [hash, setHash] = useState(window.location.hash);
@@ -23,6 +25,7 @@ function Root() {
   if (params.has("game")) return <Game />;
   if (params.has("game2") || hash === "#game") return <GameView />;
   if (hash === "#caster") return <CasterDemo />;
+  if (hash === "#leaderboard") return <Leaderboard />;
   return <App />;
 }
 

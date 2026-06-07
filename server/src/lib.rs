@@ -20,7 +20,8 @@ const MAX_RANGE: f32 = 60.0;
 
 const ROUND_LEN_MS: u64 = 75_000;
 const ROUND_END_COOLDOWN_MS: i64 = 5_000; // post-round pause before auto-restart
-const MATCH_LENGTH_ROUNDS: u32 = 5; // after this many rounds match ends (no auto-restart)
+const MATCH_LENGTH_ROUNDS: u32 = 5; // after this many rounds match ends
+const MATCH_END_COOLDOWN_MS: i64 = 8_000; // pause on the final scoreboard, then auto-reset to Lobby
 
 // Team spawn points (Z separates A from B; arena is roughly XY square at y=0).
 const SPAWN_A: Vec3 = Vec3 { x: 0.0, y: 0.0, z: 8.0 };
@@ -439,8 +440,11 @@ pub fn tick(ctx: &ReducerContext, _arg: TickSchedule) {
                 .unwrap_or(0);
             if elapsed_ms >= ROUND_END_COOLDOWN_MS {
                 if m.round >= MATCH_LENGTH_ROUNDS {
+                    // Stamp the entry time so the MatchEnd cooldown measures from
+                    // NOW (the scoreboard pause), not from when RoundEnd started.
                     ctx.db.game_match().id().update(GameMatch {
                         state: MatchState::MatchEnd,
+                        round_end_timestamp: ctx.timestamp,
                         ..m
                     });
                 } else {
@@ -449,7 +453,19 @@ pub fn tick(ctx: &ReducerContext, _arg: TickSchedule) {
             }
         }
         MatchState::MatchEnd => {
-            // Terminal state. A future `reset_match` reducer can re-enter Lobby.
+            // Self-healing: after a short scoreboard pause, auto-reset to Lobby so
+            // the game loops forever instead of dead-ending (which is what left
+            // maincloud stuck at "matchEnd 4-1" with nobody able to play). The
+            // Lobby branch then auto-starts a fresh match once both teams are
+            // populated. A manual `reset_match` reducer does the same on demand.
+            let elapsed_ms = ctx
+                .timestamp
+                .time_duration_since(m.round_end_timestamp)
+                .map(|d| d.to_micros() / 1_000)
+                .unwrap_or(0);
+            if elapsed_ms >= MATCH_END_COOLDOWN_MS {
+                reset_match_impl(ctx);
+            }
         }
     }
 }
@@ -463,6 +479,42 @@ pub fn tick(ctx: &ReducerContext, _arg: TickSchedule) {
 #[spacetimedb::reducer]
 pub fn start_round(ctx: &ReducerContext) {
     start_round_impl(ctx);
+}
+
+// Public reducer: force the match back to a fresh Lobby (scores + round reset,
+// everyone revived at spawn, kills cleared). The Lobby branch of the tick then
+// auto-starts round 1 as soon as both teams have a live player. Safe to call any
+// time — the client can wire this to a "Play again" button.
+#[spacetimedb::reducer]
+pub fn reset_match(ctx: &ReducerContext) {
+    reset_match_impl(ctx);
+}
+
+fn reset_match_impl(ctx: &ReducerContext) {
+    let Some(m) = ctx.db.game_match().id().find(0) else { return };
+    ctx.db.game_match().id().update(GameMatch {
+        round: 0,
+        score_a: 0,
+        score_b: 0,
+        round_timer_ms: 0,
+        state: MatchState::Lobby,
+        round_end_timestamp: ctx.timestamp,
+        ..m
+    });
+    // Revive everyone clean at their team spawn so the next round is fair.
+    let players: Vec<Player> = ctx.db.players().iter().collect();
+    for p in players {
+        let team = p.team;
+        ctx.db.players().id().update(Player {
+            position: team_spawn(team),
+            health: MAX_HEALTH,
+            ammo: MAG_SIZE,
+            alive: true,
+            anim_state: AnimState::Idle,
+            kills: 0,
+            ..p
+        });
+    }
 }
 
 fn start_round_impl(ctx: &ReducerContext) {
@@ -559,6 +611,23 @@ pub fn on_disconnect(ctx: &ReducerContext) {
     let me = ctx.sender();
     if let Some(p) = ctx.db.players().identity().find(me) {
         ctx.db.players().id().delete(p.id);
+    }
+
+    // Lobby rule: a 1v1 needs BOTH sides present. If someone leaves while a match
+    // is in progress, abort it and drop back to a fresh Lobby — a quit/refresh is
+    // NOT a round win, so we don't award it. Count rows (not alive) so a player
+    // who's merely dead this round still holds their team. The remaining player
+    // waits in Lobby; the tick auto-starts a new match when a 2nd player joins.
+    if let Some(m) = ctx.db.game_match().id().find(0) {
+        if m.state != MatchState::Lobby {
+            let (mut a_rows, mut b_rows) = (0u32, 0u32);
+            for p in ctx.db.players().iter() {
+                if p.team == 0 { a_rows += 1 } else { b_rows += 1 }
+            }
+            if a_rows == 0 || b_rows == 0 {
+                reset_match_impl(ctx);
+            }
+        }
     }
 }
 

@@ -1,0 +1,65 @@
+name: Build server wasm
+
+# Compiles the SpacetimeDB module to wasm in the cloud (the dev's Windows box
+# can't — OS Application Control blocks Rust build-scripts). The resulting
+# valor.wasm is uploaded as an artifact AND force-pushed to an orphan
+# `built-wasm` branch, so it can be pulled and published with
+# `spacetime publish --bin-path` (which uploads a prebuilt binary, no local
+# compile needed).
+
+on:
+  push:
+    branches: [server-lobby-fix]
+    paths:
+      - "server/**"
+      - ".github/workflows/build-server.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust + wasm target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            server/target
+          key: cargo-${{ hashFiles('server/Cargo.toml') }}
+
+      - name: Build module
+        run: cargo build --release --target wasm32-unknown-unknown --manifest-path server/Cargo.toml
+
+      - name: Collect wasm
+        run: |
+          mkdir -p out
+          cp server/target/wasm32-unknown-unknown/release/valor.wasm out/valor.wasm
+          ls -la out
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: valor-wasm
+          path: out/valor.wasm
+
+      - name: Push wasm to built-wasm branch
+        run: |
+          cd out
+          git init -q
+          git config user.email "ci@valor.local"
+          git config user.name "valor-ci"
+          git checkout -q -b built-wasm
+          git add valor.wasm
+          git commit -q -m "built valor.wasm [skip ci]"
+          git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}" built-wasm

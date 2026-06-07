@@ -7,14 +7,16 @@ import { CasterDemo } from "./caster/CasterDemo";
 import { CasterLive } from "./caster/CasterLive";
 import { Leaderboard } from "./ui/Leaderboard";
 import { SpectatorRoute } from "./spectator/SpectatorRoute";
+import { MultiplayerGame } from "./multiplayer/MultiplayerGame";
 
-// Seven screens (studio stays the default, animation-only):
+// Eight screens (studio stays the default, animation-only):
 //   /                              → Model Studio (App)
 //   /?game                         → full FPS — movement/hitscan/combat/HUD/bots (GameScene)
 //   /?game2  or  /#game            → Akhil's arena prototype (GameView)
 //   /#caster                       → Tier 1 AI caster demo against mock kill stream
 //   /#caster/live                  → Phase 4 Tier 1 + Tier 2 (live STDB + LLM color)
 //   /#leaderboard                  → Phase 3 live leaderboard (recent rounds from SpacetimeDB)
+//   /#multiplayer                  → Phase 5 networked multiplayer (server-authoritative)
 //   /#spectator                    → Phase 4 fixed-angle spectator camera (read-only)
 //   /#spectator/freefly            → Phase 4 spectator with touch orbit + pinch zoom
 function Root() {
@@ -32,6 +34,7 @@ function Root() {
   if (hash === "#caster/live") return <CasterLive />;
   if (hash === "#caster") return <CasterDemo />;
   if (hash === "#leaderboard") return <Leaderboard />;
+  if (hash === "#multiplayer") return <MultiplayerGame />;
   if (hash === "#spectator" || hash === "#spectator/freefly") return <SpectatorRoute />;
   return <App />;
 }

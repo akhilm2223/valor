@@ -32,15 +32,17 @@ const SOUND_URLS = {
 
 export type SfxName = keyof typeof SOUND_URLS;
 
-// Per-clip baseline volume so nothing blows out the mix. The death scream is set
-// deliberately the LOUDEST so it cuts over the shot/hitmarker on a kill.
+// Per-clip volume, tuned to each FILE's real peak so the mix matches intent.
+// (Measured peaks: scream 0.56, hit 1.14, shot 0.35.) The scream is boosted to
+// clearly dominate on a kill; the hot hitmarker is pulled down so it doesn't
+// drown it.
 const VOLUME: Record<SfxName, number> = {
-  shot: 0.55,
+  shot: 0.6,
   rayblast: 0.6,
   reload: 0.6,
   walk: 0.4,
-  hit: 0.55,
-  scream: 1.0,
+  hit: 0.35,
+  scream: 1.6, // file peak is only ~0.56 → ~0.9 output, the loudest cue
 };
 
 // Cap how much of a clip plays (seconds). The pistol shot mp3 has a long tail —

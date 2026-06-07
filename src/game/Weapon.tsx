@@ -37,7 +37,7 @@
 import { useRef } from "react";
 import { useFrame, useThree } from "@react-three/fiber";
 import { type Group, Quaternion, Vector3 } from "three";
-import { LOCAL_ID, MAG_SIZE, SHOT_DAMAGE, type Vec3 } from "./contracts";
+import { LOCAL_ID, MAG_SIZE, MAX_HEALTH, SHOT_DAMAGE, type Vec3 } from "./contracts";
 import { useControls, useGame } from "./stores";
 import { raycastShot } from "./hitscan";
 import { combat } from "./combat";
@@ -120,14 +120,16 @@ export function Weapon() {
     // 3-4. world (BVH) + players (ray-vs-capsule), nearest wins.
     const hit = raycastShot(originVec, dirVec, MAX_RANGE);
 
-    // 5. on an entity hit → deal damage through the combat sink.
+    // 5. on an entity hit → deal damage through the combat sink. The golden gun
+    //    is a ONE-SHOT KILL (deals full health); the normal gun deals SHOT_DAMAGE.
+    const golden = useLoadout.getState().variant === "golden";
     if (hit && hit.kind === "entity" && hit.entityId) {
-      combat.applyDamage({ targetId: hit.entityId, amount: SHOT_DAMAGE, fromDir: dirVec, byId: LOCAL_ID });
+      combat.applyDamage({ targetId: hit.entityId, amount: golden ? MAX_HEALTH : SHOT_DAMAGE, fromDir: dirVec, byId: LOCAL_ID });
     }
 
     // 6. always: shot sound (golden gun → ray-gun-blast) + muzzle flash + tracer
-    //    + recoil. getState() so the sound tracks the live equipped variant.
-    playSfx(useLoadout.getState().variant === "golden" ? "rayblast" : "shot");
+    //    + recoil.
+    playSfx(golden ? "rayblast" : "shot");
     muzzleWorldPos(tmpMuzzle.current);
     const muzzle: Vec3 = [tmpMuzzle.current.x, tmpMuzzle.current.y, tmpMuzzle.current.z];
     vfx.muzzle(muzzle);

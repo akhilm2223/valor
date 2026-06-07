@@ -38,6 +38,11 @@ const COOLDOWN_MS = 150; // min spacing between auto-fire shots (Weapon caps the
 // FaceLandmarker blendshapes "eyeBlinkLeft/Right" (1 = fully closed). We require
 // exactly ONE eye shut (a wink) so a normal blink (both shut) doesn't scope.
 const FACE_HZ = 15; // throttle face inference
+// Throttle HAND/gesture inference too. It ran every webcam frame (~30Hz) on the
+// CPU delegate (5–15ms each) on the main thread, competing with the R3F render
+// loop. 20Hz is plenty for finger-count movement (the per-frame turn feed below
+// is unaffected) and frees ~1/3 of that main-thread cost → higher, steadier FPS.
+const GESTURE_HZ = 20;
 const EYE_SHUT = 0.5; // blink score that counts an eye as closed
 const EYE_OPEN = 0.35; // blink score below which an eye is clearly open
 
@@ -124,6 +129,8 @@ export function VisionController() {
     let lastLookAt = -1;
     // scope (eyes) state
     let lastFaceAt = -1e9;
+    // hand/gesture inference throttle (see GESTURE_HZ)
+    let lastGestureAt = -1e9;
     let aiming = false; // held: one eye closed → zoom in
     // start-gate hold timer
     let calibHoldStart = -1;
@@ -176,7 +183,12 @@ export function VisionController() {
           }
           lastLookAt = now;
 
-          if (video.currentTime !== lastVideoTime && video.readyState >= 2) {
+          if (
+            now - lastGestureAt >= 1000 / GESTURE_HZ &&
+            video.currentTime !== lastVideoTime &&
+            video.readyState >= 2
+          ) {
+            lastGestureAt = now;
             lastVideoTime = video.currentTime;
             ts = Math.max(now, ts + 1);
 

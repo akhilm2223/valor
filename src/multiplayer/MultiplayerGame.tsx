@@ -24,7 +24,8 @@
 import { Component, type ReactNode, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Sky, Environment } from "@react-three/drei";
-import { Raycaster, Vector3, MathUtils, type Group, type PerspectiveCamera } from "three";
+import { Raycaster, Vector3, MathUtils, BufferGeometry, Mesh as ThreeMesh, type Group, type PerspectiveCamera } from "three";
+import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from "three-mesh-bvh";
 import { Arena, FitModel } from "../Models";
 import { Scatter } from "../Scatter";
 import { Gun } from "../Gun";
@@ -38,8 +39,7 @@ import { playSfx, initAudio } from "../game/sfx";
 import { vfx, Vfx } from "../game/vfx";
 import {
   useValorConnection,
-  useLocalPlayer,
-  usePlayers,
+  usePlayersLive,
   useGameMatch,
   useShots,
 } from "../net/useValor";
@@ -54,6 +54,15 @@ import { getSharedAudioQueue } from "../caster/AudioQueue";
 
 const NAME_KEY = "valor.player.name";
 const MODEL_KEY = "valor.player.model";
+
+// three-mesh-bvh: accelerate raycasts (the per-frame ground-snaps that walk the
+// heavy arena trimesh). Single-player patches these globally; the multiplayer
+// route never imported it, so its raycasts were brute-force over every triangle.
+// Patch once at module load — acceleratedRaycast no-ops on meshes without a
+// boundsTree, so it's safe for everything; ArenaBVH builds the tree on the arena.
+(BufferGeometry.prototype as unknown as { computeBoundsTree: typeof computeBoundsTree }).computeBoundsTree = computeBoundsTree;
+(BufferGeometry.prototype as unknown as { disposeBoundsTree: typeof disposeBoundsTree }).disposeBoundsTree = disposeBoundsTree;
+(ThreeMesh.prototype as unknown as { raycast: typeof acceleratedRaycast }).raycast = acceleratedRaycast;
 
 // Isolates a sub-tree so a failed asset load (e.g. a clip GLB that a browser
 // cached corrupt) renders nothing instead of throwing up through Suspense and
@@ -206,10 +215,12 @@ function RemotePlayerRig({
   player,
   localTeam,
   arenaRef,
+  byId,
 }: {
   player: Player;
   localTeam?: number;
   arenaRef: React.RefObject<Group | null>;
+  byId: React.MutableRefObject<Map<number, Player>>;
 }) {
   const ringColor = player.team === 0 ? "#4a90e2" : "#e25555";
   const sameTeam = localTeam !== undefined && player.team === localTeam;
@@ -232,9 +243,12 @@ function RemotePlayerRig({
   useFrame((_, dt) => {
     const g = groupRef.current;
     if (!g) return;
+    // LIVE row (fresh position/aim each frame) — the `player` prop is only
+    // refreshed on render-relevant changes, so position would otherwise be stale.
+    const live = byId.current.get(player.id) ?? player;
     const [ox, oz] = sameTeam ? fanOffset(player.id) : [0, 0];
-    const px = player.position.x + ox;
-    const pz = player.position.z + oz;
+    const px = live.position.x + ox;
+    const pz = live.position.z + oz;
     const arena = arenaRef.current;
     if (arena && frame.current++ % 12 === 0) {
       rc.current.set(scratch.current.set(px, 200, pz), DOWN);
@@ -258,7 +272,7 @@ function RemotePlayerRig({
     }
     g.position.set(sm.x, sm.y, sm.z);
     // Smooth the facing too (shortest-arc), so turns don't snap.
-    const targetYaw = Math.atan2(player.aimVector.x, player.aimVector.z) + Math.PI;
+    const targetYaw = Math.atan2(live.aimVector.x, live.aimVector.z) + Math.PI;
     let d = targetYaw - yawRef.current;
     while (d > Math.PI) d -= Math.PI * 2;
     while (d < -Math.PI) d += Math.PI * 2;
@@ -288,6 +302,31 @@ function RemotePlayerRig({
       </mesh>
     </group>
   );
+}
+
+// Build a three-mesh-bvh boundsTree on each arena mesh once, so the per-frame
+// ground-snap raycasts (camera + every remote player) become microseconds
+// instead of a full-triangle scan. Runs the first few seconds to catch Scatter's
+// async props, idempotent via a userData flag, then stops.
+function ArenaBVH({ groupRef }: { groupRef: React.RefObject<Group | null> }) {
+  const frames = useRef(0);
+  useFrame(() => {
+    if (frames.current > 120) return; // ~2s, then leave it alone
+    frames.current++;
+    const g = groupRef.current;
+    if (!g) return;
+    g.traverse((o) => {
+      const mesh = o as ThreeMesh;
+      if (!(mesh as unknown as { isMesh?: boolean }).isMesh) return;
+      if (mesh.userData.bvh) return;
+      const geom = mesh.geometry as BufferGeometry & { boundsTree?: unknown; computeBoundsTree?: () => void };
+      if (geom && !geom.boundsTree && geom.computeBoundsTree) {
+        geom.computeBoundsTree();
+        mesh.userData.bvh = true;
+      }
+    });
+  });
+  return null;
 }
 
 // Mounts useSpectatorCam inside the Canvas (the hook needs useFrame/useThree).
@@ -377,7 +416,7 @@ function wrapAngle(a: number): number {
  *  Returns null if nothing qualifies (then we send plain camera-forward). */
 function pickAssistAim(
   me: Player,
-  players: Player[],
+  players: Iterable<Player>,
   fx: number,
   fz: number,
 ): { x: number; y: number; z: number } | null {
@@ -412,6 +451,10 @@ const SCOPED_FOV = 40;
 const AIM_LERP = 12; // fov damp rate toward target
 const RECOIL_KICK = 0.05; // radians of upward pitch per shot
 const RECOIL_RECOVER = 14; // damp rate back to neutral
+// Movement speeds — MUST match the server (lib.rs MOVE_SPEED/CROUCH_SPEED) so
+// client prediction integrates identically and reconciliation barely corrects.
+const MOVE_SPEED = 3.6;
+const CROUCH_SPEED = 1.6;
 // Gun-barrel offset in the camera's local frame (right, down, forward=-Z) — the
 // muzzle/tracer origin so the streak leaves the held gun, not your eye.
 const MUZZLE_LOCAL = new Vector3(0.18, -0.16, -0.62);
@@ -420,14 +463,15 @@ const TRACER_RANGE = 60; // how far the tracer streaks along the aim (= server M
 interface VisionInputBridgeProps {
   driver: ValorDriver | null;
   localPlayer: Player | undefined;
-  players: Player[];
+  // Live player map (read every frame for fresh positions, no re-render churn).
+  byId: React.MutableRefObject<Map<number, Player>>;
   arenaRef: React.RefObject<Group | null>;
   // Called (only on change) when aim-assist acquires/loses a target, so the HUD
   // crosshair can show the player WHERE the gun will actually shoot.
   onLockChange?: (locked: boolean) => void;
 }
 
-function VisionInputBridge({ driver, localPlayer, players, arenaRef, onLockChange }: VisionInputBridgeProps) {
+function VisionInputBridge({ driver, localPlayer, byId, arenaRef, onLockChange }: VisionInputBridgeProps) {
   const lockedPrev = useRef(false);
   const camera = useThree((s) => s.camera);
   const rc = useRef(new Raycaster());
@@ -453,6 +497,9 @@ function VisionInputBridge({ driver, localPlayer, players, arenaRef, onLockChang
   useFrame((_, dtRaw) => {
     if (!driver || !localPlayer) return;
     const ctrl = useControls.getState();
+    // LIVE local-player row — fresh position/aim every frame (no re-render churn).
+    // Falls back to the React snapshot until the live map is populated.
+    const lp = byId.current.get(localPlayer.id) ?? localPlayer;
 
     // ── Face the arena on (re)spawn ────────────────────────────────────────
     // The server orients each team's spawn aim toward the opponent (team A → -Z,
@@ -460,9 +507,9 @@ function VisionInputBridge({ driver, localPlayer, players, arenaRef, onLockChang
     // hardcodes yaw=0 (-Z), so a player spawned on the far side (z=-8) faces AWAY
     // from the arena into empty sky — the "plain screen" bug. atan2(-x,-z) maps
     // the forward aim vector back to a yaw in our (-sinY,-cosY) basis.
-    if (localPlayer.alive) {
+    if (lp.alive) {
       if (!yawInit.current) {
-        const a = localPlayer.aimVector;
+        const a = lp.aimVector;
         if (a && (a.x !== 0 || a.z !== 0)) {
           yaw.current = Math.atan2(-a.x, -a.z);
           yawInit.current = true;
@@ -493,7 +540,7 @@ function VisionInputBridge({ driver, localPlayer, players, arenaRef, onLockChang
     if (len > 1) { lx /= len; lz /= len; }
 
     // ── Aim → camera-forward, bent onto the nearest enemy by aim assist ────
-    const assist = pickAssistAim(localPlayer, players, fx, fz);
+    const assist = pickAssistAim(lp, byId.current.values(), fx, fz);
     const aim = assist ?? { x: fx, y: 0, z: fz };
     // Surface lock state to the HUD (only on change — cheap). `assist` non-null
     // means an enemy is in the cone and the shot WILL bend onto them.
@@ -515,7 +562,7 @@ function VisionInputBridge({ driver, localPlayer, players, arenaRef, onLockChang
     // dead even though ammo ticks down. Fire the feel locally on the rising edge
     // (gated the same way the Driver gates the reducer: alive + ammo) so the
     // shot looks/sounds fired the instant you pull. reload plays its rack.
-    if (firePressed && localPlayer.alive && localPlayer.ammo > 0) {
+    if (firePressed && lp.alive && lp.ammo > 0) {
       playSfx("shot");
       recoilPitch.current += RECOIL_KICK;
       // Muzzle flash + tracer at the gun barrel, streaking along the (assisted)
@@ -533,20 +580,35 @@ function VisionInputBridge({ driver, localPlayer, players, arenaRef, onLockChang
 
     driver.updateInput(
       { aim, lean: { x: lx, z: lz }, crouch: ctrl.crouch, firePressed, reload },
-      localPlayer,
+      lp,
     );
 
     // ── First-person camera (only while alive; spectator cam owns it dead) ─
-    if (localPlayer.alive) {
-      const p = localPlayer.position;
-      // Snap on first frame / after respawn jumps; otherwise smooth-chase.
+    if (lp.alive) {
+      const p = lp.position; // server truth (lagged by network RTT)
+      const dt = Math.min(dtRaw, 0.05);
+      // CLIENT-SIDE PREDICTION. The server is authoritative and ~200–300ms behind
+      // your input (30Hz send + RTT + 30Hz tick). Instead of waiting for snapshots
+      // and easing toward them (the old laggy "smooth-chase"), integrate our OWN
+      // movement locally EVERY frame — the exact same `position += lean*speed*dt`
+      // the server runs (no collision server-side, so the two match). The camera
+      // now responds the instant you move. `smooth.current` = predicted feet pos.
       if (!smooth.current || Math.hypot(p.x - smooth.current.x, p.z - smooth.current.z) > 4) {
+        // First frame or a teleport/respawn → snap to the server.
         smooth.current = { x: p.x, y: p.y, z: p.z };
       } else {
-        const alpha = 1 - Math.exp(-18 * Math.min(dtRaw, 0.05));
-        smooth.current.x += (p.x - smooth.current.x) * alpha;
-        smooth.current.y += (p.y - smooth.current.y) * alpha;
-        smooth.current.z += (p.z - smooth.current.z) * alpha;
+        const speed = ctrl.crouch ? CROUCH_SPEED : MOVE_SPEED;
+        smooth.current.x += lx * speed * dt;
+        smooth.current.z += lz * speed * dt;
+        // Reconcile to server truth ONLY while standing still. Correcting mid-move
+        // would rubber-band (the server is just a delayed copy of this same math),
+        // so we trust local integration when moving and converge when stopped.
+        if (lx === 0 && lz === 0) {
+          const k = 1 - Math.exp(-8 * dt);
+          smooth.current.x += (p.x - smooth.current.x) * k;
+          smooth.current.z += (p.z - smooth.current.z) * k;
+        }
+        smooth.current.y += (p.y - smooth.current.y) * (1 - Math.exp(-18 * dt));
       }
       const eye = ctrl.crouch ? CAPSULE.crouchEye : CAPSULE.standEye;
       // Ground-snap: the server keeps every player at y=0 with NO gravity, but
@@ -591,17 +653,6 @@ function VisionInputBridge({ driver, localPlayer, players, arenaRef, onLockChang
         cam.updateProjectionMatrix();
       }
     }
-
-    // TEMP DEBUG (remove): movement diagnosis. animState reflects the SERVER's
-    // view of our lean (it sets Walk/Idle in submit_input) → proves whether the
-    // reducer call lands. serverLean is what the server stored.
-    (window as unknown as Record<string, unknown>).__dbg = {
-      ppos: [+localPlayer.position.x.toFixed(2), +localPlayer.position.z.toFixed(2)],
-      lean: [+lx.toFixed(2), +lz.toFixed(2)],
-      serverLean: [+localPlayer.lean.x.toFixed(2), +localPlayer.lean.z.toFixed(2)],
-      anim: localPlayer.animState?.tag,
-      mF: ctrl.moveForward,
-    };
   });
 
   return null;
@@ -834,10 +885,15 @@ function JoinForm({
 
 export function MultiplayerGame() {
   const { conn, status, identity, error } = useValorConnection();
-  const players = usePlayers(conn);
+  // `players` re-renders only on render-relevant changes; `byId` carries live
+  // per-frame position/aim, read inside useFrame (no re-render on movement).
+  const { players, byId } = usePlayersLive(conn);
   const match = useGameMatch(conn);
   const shots = useShots(conn, 5);
-  const localPlayer = useLocalPlayer(conn, identity);
+  const localPlayer = useMemo(
+    () => (identity ? players.find((p) => p.identity.isEqual(identity)) : undefined),
+    [players, identity],
+  );
 
   // Live refs mirroring the hook return values — the dev hook below exposes
   // these via getters so an automated smoke script always reads the latest
@@ -897,7 +953,8 @@ export function MultiplayerGame() {
       const mine = s.shooterId === myId;
       if (!mine) {
         playSfx("shot", 0.7); // enemy gunfire
-        const shooter = playersById.get(s.shooterId);
+        // Live positions (byId) so the tracer leaves the shooter's CURRENT spot.
+        const shooter = byId.current.get(s.shooterId);
         if (shooter) {
           const ox = shooter.position.x;
           const oy = shooter.position.y + HEAD_OFFSET_Y;
@@ -906,7 +963,7 @@ export function MultiplayerGame() {
           let ey = oy + s.aimVector.y * TRACER_RANGE;
           let ez = oz + s.aimVector.z * TRACER_RANGE;
           if (s.hit && s.victimId != null) {
-            const v = playersById.get(s.victimId);
+            const v = byId.current.get(s.victimId);
             if (v) { ex = v.position.x; ey = v.position.y + 0.9; ez = v.position.z; }
           }
           vfx.muzzle([ox, oy, oz]);
@@ -918,7 +975,7 @@ export function MultiplayerGame() {
     }
     const maxId = shots.reduce((m, s) => (s.id > m ? s.id : m), lastShotId.current ?? -1n);
     lastShotId.current = maxId;
-  }, [shots, localPlayer, playersById]);
+  }, [shots, localPlayer, byId]);
 
   // Death sounds: watch every player's alive flag for a true→false flip and play
   // a scream (a sharper, full-volume cue when it's US going down). Driven off the
@@ -1054,6 +1111,7 @@ export function MultiplayerGame() {
             <Arena />
             <Scatter />
           </group>
+          <ArenaBVH groupRef={arenaRef} />{/* accelerate ground-snap raycasts */}
           {/* First-person: hide our own body while alive (camera sits at the
               eye). Render it when dead so the spectator orbit sees the corpse. */}
           {joined && localPlayer && !localPlayer.alive ? (
@@ -1063,7 +1121,7 @@ export function MultiplayerGame() {
           ) : null}
           {remotePlayers.map((p) => (
             <AssetBoundary key={p.id}>
-              <RemotePlayerRig player={p} localTeam={localPlayer?.team} arenaRef={arenaRef} />
+              <RemotePlayerRig player={p} localTeam={localPlayer?.team} arenaRef={arenaRef} byId={byId} />
             </AssetBoundary>
           ))}
           {/* First-person arms + gun (same rig single-player uses), shown only
@@ -1083,7 +1141,7 @@ export function MultiplayerGame() {
         <CamRig localPlayer={localPlayer} />
         {joined ? (
           <>
-            <VisionInputBridge driver={driver} localPlayer={localPlayer} players={players} arenaRef={arenaRef} onLockChange={setAimLocked} />
+            <VisionInputBridge driver={driver} localPlayer={localPlayer} byId={byId} arenaRef={arenaRef} onLockChange={setAimLocked} />
             {/* Keyboard/mouse fallback — writes the SAME useControls store the
                 webcam does, so testing without a camera still works. */}
             <InputController />

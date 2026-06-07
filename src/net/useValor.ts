@@ -16,7 +16,7 @@
 //   • `useLocalPlayer` takes `(conn, identity)` explicitly rather than reaching
 //     into `(conn as any).identity` so the consumer's types stay clean.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type MutableRefObject } from "react";
 import { Identity } from "spacetimedb";
 import {
   connectValor,
@@ -112,6 +112,63 @@ export function usePlayers(conn: ValorConnection | null): Player[] {
 }
 
 /**
+ * Performance-optimized players subscription for the hot render path (the game
+ * view). The problem with `usePlayers`: it `setState`s a new array on EVERY row
+ * event, and the server rewrites each moving player's row ~30×/s — so the whole
+ * React tree re-renders 30–60×/s purely from position churn (it's already
+ * consumed in `useFrame`, making the React work pure waste that stutters frames).
+ *
+ * This hook splits the two concerns:
+ *   • `byId` (a ref Map) is updated on EVERY event — read it inside `useFrame`
+ *     for live positions/aim. No React involved, so position churn is free.
+ *   • `players` (React state) is rebuilt ONLY when a RENDER-relevant field
+ *     changes (join/leave/alive/health/ammo/kills/anim/team/name) — NOT on the
+ *     per-tick position/lean/aim writes. So rigs mount/unmount + HUD numbers +
+ *     animation clips update on real events, and continuous movement triggers
+ *     zero re-renders.
+ */
+export interface PlayersLive {
+  players: Player[];
+  byId: MutableRefObject<Map<number, Player>>;
+}
+
+export function usePlayersLive(conn: ValorConnection | null): PlayersLive {
+  const byId = useRef<Map<number, Player>>(new Map());
+  const [players, setPlayers] = useState<Player[]>([]);
+  const sigRef = useRef("");
+  useEffect(() => {
+    if (!conn) return;
+    const sync = (force: boolean) => {
+      const m = byId.current;
+      m.clear();
+      for (const p of conn.db.players.iter()) m.set(p.id, p);
+      const arr = Array.from(m.values()).sort((a, b) => a.id - b.id);
+      // Signature of only the fields that affect RENDER output. Position, lean,
+      // aim and crouch are deliberately excluded — those flow through `byId`.
+      let sig = "";
+      for (const p of arr) {
+        sig += `${p.id}:${p.alive ? 1 : 0}:${p.health}:${p.ammo}:${p.kills}:${p.animState?.tag}:${p.team}:${p.name}|`;
+      }
+      if (force || sig !== sigRef.current) {
+        sigRef.current = sig;
+        setPlayers(arr);
+      }
+    };
+    sync(true);
+    const onAny = () => sync(false);
+    conn.db.players.onInsert(onAny);
+    conn.db.players.onUpdate(onAny);
+    conn.db.players.onDelete(onAny);
+    return () => {
+      conn.db.players.removeOnInsert(onAny);
+      conn.db.players.removeOnUpdate(onAny);
+      conn.db.players.removeOnDelete(onAny);
+    };
+  }, [conn]);
+  return { players, byId };
+}
+
+/**
  * The `players` row matching the local identity, or `undefined` while we're
  * still connecting / before the server has acknowledged our join. Takes
  * `identity` explicitly so the consumer's `useValorConnection` result threads
@@ -132,6 +189,7 @@ export function useLocalPlayer(
  */
 export function useGameMatch(conn: ValorConnection | null): GameMatch | undefined {
   const [match, setMatch] = useState<GameMatch | undefined>(undefined);
+  const sigRef = useRef("");
   useEffect(() => {
     if (!conn) return;
     const refresh = () => {
@@ -140,7 +198,17 @@ export function useGameMatch(conn: ValorConnection | null): GameMatch | undefine
         next = m;
         break;
       }
-      setMatch(next);
+      // The server rewrites round_timer_ms EVERY tick (~30Hz), which would
+      // re-render the whole view 30×/s even when nobody moves. Only re-render on
+      // a render-relevant change: state/score/round, or the timer's whole SECOND
+      // (the HUD only shows seconds). Quantizing the timer kills the storm.
+      const sig = next
+        ? `${next.state.tag}:${next.scoreA}:${next.scoreB}:${next.round}:${Math.ceil(Number(next.roundTimerMs) / 1000)}`
+        : "none";
+      if (sig !== sigRef.current) {
+        sigRef.current = sig;
+        setMatch(next);
+      }
     };
     refresh();
     const onAny = () => refresh();

@@ -13,9 +13,12 @@ const TEAM_B = "#ff8a6e";
 interface MatchScoreBarProps {
   match: GameMatch | undefined;
   style?: React.CSSProperties;
+  /** Optional right-side slot (operator controls, vote button, etc.). When
+   *  provided, replaces the default timer cell. */
+  right?: React.ReactNode;
 }
 
-export function MatchScoreBar({ match, style }: MatchScoreBarProps) {
+export function MatchScoreBar({ match, style, right }: MatchScoreBarProps) {
   return (
     <div
       style={{
@@ -86,17 +89,22 @@ export function MatchScoreBar({ match, style }: MatchScoreBarProps) {
 
       <div
         style={{
-          minWidth: 180,
-          textAlign: "right",
+          minWidth: 200,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "flex-end",
+          gap: 14,
           fontSize: 15,
-          opacity: 0.75,
           fontWeight: 600,
           letterSpacing: 0.3,
         }}
       >
-        {match
-          ? `${Math.round(Number(match.roundTimerMs) / 1000)}s left`
-          : "—"}
+        <span style={{ opacity: 0.75 }}>
+          {match
+            ? `${Math.round(Number(match.roundTimerMs) / 1000)}s left`
+            : "—"}
+        </span>
+        {right}
       </div>
     </div>
   );

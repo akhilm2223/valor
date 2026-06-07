@@ -17,7 +17,7 @@ import { useRef, useState } from "react";
 import { useFrame, useThree } from "@react-three/fiber";
 import { type Group, type Object3D } from "three";
 import { AnimatedCharacter } from "./AnimatedCharacter";
-import { Gun } from "../Gun";
+import { Gun, type GunVariant } from "../Gun";
 import { LOCAL_ID, resolveAnimState, type AnimState } from "./contracts";
 import { transforms, useGame } from "./stores";
 
@@ -28,7 +28,13 @@ const RIG_YAW = Math.PI; // face the same way the camera looks (-Z)
 // skinned mesh, so shrinking these bones shrinks the vertices weighted to them).
 const HIDE_BONES = new Set(["mixamorigHead", "mixamorigNeck"]);
 
-export function FpvArms() {
+interface FpvArmsProps {
+  /** Gun variant — caller threads in from the networked player row when the
+   *  spectator-voted Golden Gun is awarded. Defaults to "normal". */
+  variant?: GunVariant;
+}
+
+export function FpvArms({ variant = "normal" }: FpvArmsProps = {}) {
   const root = useRef<Group>(null);
   const rig = useRef<Group>(null);
   const camera = useThree((s) => s.camera);
@@ -68,7 +74,7 @@ export function FpvArms() {
         <AnimatedCharacter
           url="/models/character_a.glb"
           animState={anim}
-          hold={<Gun length={0.22} variant="normal" />}
+          hold={<Gun length={0.22} variant={variant} />}
         />
       </group>
     </group>

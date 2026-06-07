@@ -1,20 +1,21 @@
 # Spectator + Broadcast — Implementation Reference
 
-> Recovery doc. If everything in `aidan` is lost, this is the spec to rebuild from. Last verified working: 2026-06-07. Commits: `2611882`, `cddd540`, `ca3e197`.
+> Recovery doc. If everything in `aidan` is lost, this is the spec to rebuild from. Last verified working: 2026-06-07. Commits: `2611882`, `cddd540`, `ca3e197`, plus the in-progress Golden Gun work.
 
 ## What this covers
 
-Three connected features added on top of Phase 5 multiplayer:
+Four connected features added on top of Phase 5 multiplayer:
 
 1. **Mobile ghost-cam spectator** at `#spectator` (phone touch) and `?mobile=1#spectator` (desktop QA).
 2. **QR join system** — one `<QrJoinBadge>` component dropped into four placements: standalone `#join` wall, `#caster/live` corner, `#multiplayer` corner, and `#broadcast` rail.
 3. **Broadcast view** at `#broadcast` — 2×2 player POV grid + scrolling commentary + scoreboard, for projecting on a wall during the event.
+4. **Golden Gun spectator vote** — broadcast operator triggers a 20s vote, phone spectators tap a player chip on their device, the most-voted player gets a one-shot-kill golden gun until they die.
 
-All three are **read-only** from the game's perspective — they never call `join`, `submit_input`, `fire`, etc. The only write is the spectator → `spectator_join` / `spectator_leave` reducers.
+The first three are **read-only** from the game's perspective. Golden Gun voting adds two reducers that *spectators* (not players) can call: `cast_golden_vote` and the operator-only `start_golden_vote`. Players themselves still only ever drive `join` / `submit_input` / `fire`.
 
 ## Architecture in one paragraph
 
-The spectator is invisible to players **by construction**: the `spectators` STDB table carries only `{identity, joined_at}`. Players' clients render from the `players` table only, so spectators have no in-world representation to draw. The broadcast view is just a fancier read-only spectator: it subscribes to the same `players` + `game_match` + `commentary` tables, and renders four follow-cameras + a chyron-style commentary list. The QR badge is a thin React component over `qrcode.react` that auto-derives the spectator URL from `window.location.origin`, so it works the same way on `localhost`, the LAN IP, the Cloudflare quick tunnel, or any future deployed origin without configuration.
+The spectator is invisible to players **by construction**: the `spectators` STDB table carries only `{identity, joined_at}`. Players' clients render from the `players` table only, so spectators have no in-world representation to draw. The broadcast view is just a fancier read-only spectator: it subscribes to the same `players` + `game_match` + `commentary` tables, and renders four follow-cameras + a chyron-style commentary list. The QR badge is a thin React component over `qrcode.react` that auto-derives the spectator URL from `window.location.origin`, so it works the same way on `localhost`, the LAN IP, the Cloudflare quick tunnel, or any future deployed origin without configuration. The Golden Gun feature layers a `(state, ends_at, winner_id)` tuple onto `game_match` plus a separate `golden_votes` table keyed by voter identity — the entire vote lifecycle (start → cast → tally → award → consume on death) is driven by the existing 30Hz `tick` reducer plus three new reducers and one modified damage calc inside `fire`.
 
 ---
 
@@ -524,24 +525,527 @@ if (hash === "#broadcast") return <BroadcastView />;
 
 ---
 
-## 7. All routes summary
+## 7. Golden Gun spectator vote
+
+A spectator-driven special event. The broadcast operator clicks a button, a 20-second vote opens for all phone spectators, the most-voted player wins a one-shot-kill weapon until they die. This sits *inside* the broadcast and mobile-spectator UIs as a **conditional overlay**: when no vote is in flight (the default `Idle` state), the broadcast and mobile spectator render exactly what they do without this feature.
+
+### 7.1 Server-side changes (`server/src/lib.rs`)
+
+**New imports:**
+
+```rust
+use std::collections::HashMap;
+```
+
+**New constants (top of file with the others):**
+
+```rust
+const GOLDEN_VOTE_WINDOW_MS: i64 = 20_000; // 20s voting window
+const GOLDEN_REVEAL_MS: i64 = 5_000;       // 5s winner reveal before Idle
+```
+
+**New enum (near `MatchState`):**
+
+```rust
+#[derive(SpacetimeType, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum GoldenVoteState {
+    #[default]
+    Idle,
+    Voting,
+    Reveal,
+}
+```
+
+**`Player` struct — add one field at the end:**
+
+```rust
+pub has_golden_gun: bool,
+```
+
+**`GameMatch` struct — add three fields:**
+
+```rust
+pub golden_vote_state: GoldenVoteState,
+/// Wall-clock micros-since-epoch. During Voting = tally deadline.
+/// During Reveal = transition-to-Idle deadline.
+pub golden_vote_ends_at: i64,
+/// Player id of the most recent winner (for Reveal animation). 0 = no winner.
+pub golden_vote_winner_id: u32,
+```
+
+**New table `golden_votes`** (place after `Spectator`):
+
+```rust
+#[spacetimedb::table(accessor = golden_votes, public)]
+pub struct GoldenVote {
+    #[primary_key]
+    pub voter_identity: Identity,
+    pub target_player_id: u32,
+    pub cast_at: Timestamp,
+}
+```
+
+PK on `voter_identity` gives "one switchable vote per voter" for free — re-cast is an UPDATE.
+
+**`init` reducer — initialize the new GameMatch fields:**
+
+```rust
+ctx.db.game_match().insert(GameMatch {
+    /* existing fields */,
+    golden_vote_state: GoldenVoteState::Idle,
+    golden_vote_ends_at: 0,
+    golden_vote_winner_id: 0,
+});
+```
+
+**`join` reducer — initialize new players:**
+
+```rust
+ctx.db.players().insert(Player {
+    /* existing fields */,
+    has_golden_gun: false,
+});
+```
+
+**`fire` reducer — one-shot damage when shooter has the gun, clear gun on wielder death:**
+
+```rust
+// Replace `let (hit, victim_id, damage) = match best { Some((vid, _)) => (true, Some(vid), SHOT_DAMAGE), ... }` with:
+let (hit, victim_id, damage) = match best {
+    Some((vid, _)) => {
+        let dmg = if shooter.has_golden_gun {
+            ctx.db.players().id().find(vid).map(|v| v.health).unwrap_or(SHOT_DAMAGE)
+        } else {
+            SHOT_DAMAGE
+        };
+        (true, Some(vid), dmg)
+    }
+    None => (false, None, 0),
+};
+```
+
+And inside the victim-update block, add `has_golden_gun: now_alive && victim.has_golden_gun` so the gun clears the moment the wielder dies:
+
+```rust
+ctx.db.players().id().update(Player {
+    health: new_health,
+    alive: now_alive,
+    anim_state: if now_alive { AnimState::Hit } else { AnimState::Death },
+    has_golden_gun: now_alive && victim.has_golden_gun, // ← added
+    ..victim.clone()
+});
+```
+
+**`tick` reducer — vote state machine, BEFORE the existing round-state block:**
+
+```rust
+let now_us = ctx.timestamp.to_micros_since_unix_epoch();
+match m.golden_vote_state {
+    GoldenVoteState::Voting if now_us >= m.golden_vote_ends_at => {
+        finalize_golden_vote(ctx, &m);
+    }
+    GoldenVoteState::Reveal if now_us >= m.golden_vote_ends_at => {
+        ctx.db.game_match().id().update(GameMatch {
+            golden_vote_state: GoldenVoteState::Idle,
+            golden_vote_ends_at: 0,
+            golden_vote_winner_id: 0,
+            ..m.clone()
+        });
+    }
+    _ => {}
+}
+// Re-read after potential state change.
+let Some(m) = ctx.db.game_match().id().find(0) else { return };
+```
+
+**Two new public reducers + one helper:**
+
+```rust
+#[spacetimedb::reducer]
+pub fn start_golden_vote(ctx: &ReducerContext) -> Result<(), String> {
+    let Some(m) = ctx.db.game_match().id().find(0) else { return Err("no match".into()) };
+    if m.state != MatchState::Live {
+        return Err("vote only during Live rounds".into());
+    }
+    if m.golden_vote_state != GoldenVoteState::Idle {
+        return Err("vote already in flight".into());
+    }
+    // Clear any leftover votes from a previous cycle.
+    let stale: Vec<Identity> = ctx.db.golden_votes().iter().map(|v| v.voter_identity).collect();
+    for id in stale {
+        ctx.db.golden_votes().voter_identity().delete(id);
+    }
+    // Clear any stale gun flag (defensive).
+    let armed: Vec<Player> = ctx.db.players().iter().filter(|p| p.has_golden_gun).collect();
+    for p in armed {
+        ctx.db.players().id().update(Player { has_golden_gun: false, ..p });
+    }
+    let ends_at = ctx.timestamp.to_micros_since_unix_epoch() + GOLDEN_VOTE_WINDOW_MS * 1000;
+    ctx.db.game_match().id().update(GameMatch {
+        golden_vote_state: GoldenVoteState::Voting,
+        golden_vote_ends_at: ends_at,
+        golden_vote_winner_id: 0,
+        ..m
+    });
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn cast_golden_vote(ctx: &ReducerContext, target_player_id: u32) -> Result<(), String> {
+    let Some(m) = ctx.db.game_match().id().find(0) else { return Err("no match".into()) };
+    if m.golden_vote_state != GoldenVoteState::Voting {
+        return Err("no vote in flight".into());
+    }
+    let Some(target) = ctx.db.players().id().find(target_player_id) else {
+        return Err("no such player".into());
+    };
+    if !target.alive {
+        return Err("target is not alive".into());
+    }
+    let voter = ctx.sender();
+    if let Some(existing) = ctx.db.golden_votes().voter_identity().find(voter) {
+        ctx.db.golden_votes().voter_identity().update(GoldenVote {
+            target_player_id,
+            cast_at: ctx.timestamp,
+            ..existing
+        });
+    } else {
+        ctx.db.golden_votes().insert(GoldenVote {
+            voter_identity: voter,
+            target_player_id,
+            cast_at: ctx.timestamp,
+        });
+    }
+    Ok(())
+}
+
+// Helper called by tick when the voting window expires.
+fn finalize_golden_vote(ctx: &ReducerContext, m: &GameMatch) {
+    let mut tally: HashMap<u32, u32> = HashMap::new();
+    for v in ctx.db.golden_votes().iter() {
+        *tally.entry(v.target_player_id).or_insert(0) += 1;
+    }
+    let winner: Option<u32> = tally
+        .into_iter()
+        .filter(|(pid, _)| ctx.db.players().id().find(*pid).map(|p| p.alive).unwrap_or(false))
+        .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0))) // ties → lowest id
+        .map(|(pid, _)| pid);
+    if let Some(wid) = winner {
+        if let Some(p) = ctx.db.players().id().find(wid) {
+            let winner_name = p.name.clone();
+            ctx.db.players().id().update(Player { has_golden_gun: true, ..p });
+            ctx.db.commentary().insert(Commentary {
+                id: 0,
+                kind: CommentaryKind::Bark,
+                text: format!("{} wins the Golden Gun!", winner_name),
+                created_at: ctx.timestamp,
+            });
+        }
+    }
+    let reveal_ends_at = ctx.timestamp.to_micros_since_unix_epoch() + GOLDEN_REVEAL_MS * 1000;
+    ctx.db.game_match().id().update(GameMatch {
+        golden_vote_state: GoldenVoteState::Reveal,
+        golden_vote_ends_at: reveal_ends_at,
+        golden_vote_winner_id: winner.unwrap_or(0),
+        ..m.clone()
+    });
+}
+```
+
+**`on_disconnect` — clear the wielder's gun + drop their vote:**
+
+```rust
+#[spacetimedb::reducer(client_disconnected)]
+pub fn on_disconnect(ctx: &ReducerContext) {
+    let me = ctx.sender();
+    if let Some(p) = ctx.db.players().identity().find(me) {
+        ctx.db.players().id().update(Player {
+            alive: false,
+            has_golden_gun: false, // ← added
+            ..p
+        });
+    }
+    ctx.db.spectators().identity().delete(me);
+    ctx.db.golden_votes().voter_identity().delete(me); // ← added
+}
+```
+
+### 7.2 Publish + bindings
+
+Adding `has_golden_gun` and the new GameMatch fields to existing tables is a **non-additive schema change** without `#[default]` field annotations. The publish requires `--delete-data` to wipe all current table rows and re-run `init`:
+
+```bash
+spacetime publish -s maincloud -p server --yes=remote,delete-data --delete-data valor-xv83g
+spacetime generate --lang typescript --out-dir src/stdb --module-path server
+```
+
+The `--yes=remote,delete-data` skips the two interactive prompts (non-local-server + destructive-action). After regenerating, three new files appear under `src/stdb/`:
+
+- `golden_votes_table.ts`
+- `start_golden_vote_reducer.ts`
+- `cast_golden_vote_reducer.ts`
+
+**Gotcha observed during this work**: a publish that doesn't see schema changes may silently fall back to a no-op even if it says `Updated database`. If `spacetime sql -s maincloud valor-xv83g "SELECT * FROM golden_votes"` returns `no such table` after publish, run `cargo clean -p valor --manifest-path server/Cargo.toml --target wasm32-unknown-unknown` and republish.
+
+### 7.3 Client subscription + hook
+
+**`src/net/Connection.ts`** — add `golden_votes` to `DEFAULT_QUERIES`:
+
+```ts
+const DEFAULT_QUERIES = [
+  /* existing */,
+  "SELECT * FROM golden_votes",
+];
+```
+
+**`src/net/useValor.ts`** — new view-derivation hook:
+
+```ts
+export type GoldenVoteStateTag = "Idle" | "Voting" | "Reveal";
+
+export interface GoldenVoteView {
+  state: GoldenVoteStateTag;
+  endsAtMs: number | null;
+  tally: Map<number, number>;
+  totalVotes: number;
+  myVoteTargetId: number | null;
+  winnerId: number;
+}
+
+export function useGoldenVote(
+  conn: ValorConnection | null,
+  identity: Identity | null,
+  match: GameMatch | undefined,
+): GoldenVoteView {
+  const [tally, setTally] = useState<Map<number, number>>(new Map());
+  const [myVote, setMyVote] = useState<number | null>(null);
+  useEffect(() => {
+    if (!conn) return;
+    const refresh = () => {
+      const t = new Map<number, number>();
+      let mine: number | null = null;
+      for (const v of conn.db.golden_votes.iter()) {
+        t.set(v.targetPlayerId, (t.get(v.targetPlayerId) ?? 0) + 1);
+        if (identity && v.voterIdentity.isEqual(identity)) {
+          mine = v.targetPlayerId;
+        }
+      }
+      setTally(t);
+      setMyVote(mine);
+    };
+    refresh();
+    const onAny = () => refresh();
+    conn.db.golden_votes.onInsert(onAny);
+    conn.db.golden_votes.onUpdate(onAny);
+    conn.db.golden_votes.onDelete(onAny);
+    return () => {
+      conn.db.golden_votes.removeOnInsert(onAny);
+      conn.db.golden_votes.removeOnUpdate(onAny);
+      conn.db.golden_votes.removeOnDelete(onAny);
+    };
+  }, [conn, identity]);
+  const stateTag = (match?.goldenVoteState?.tag ?? "Idle") as GoldenVoteStateTag;
+  const endsAtMs =
+    stateTag === "Idle" || !match
+      ? null
+      : Math.floor(Number(match.goldenVoteEndsAt) / 1000); // i64 micros → number ms
+  const totalVotes = Array.from(tally.values()).reduce((s, n) => s + n, 0);
+  return { state: stateTag, endsAtMs, tally, totalVotes, myVoteTargetId: myVote, winnerId: match?.goldenVoteWinnerId ?? 0 };
+}
+```
+
+### 7.4 Broadcast overlay
+
+**`src/broadcast/useGoldenVoteCountdown.ts`** — 4Hz local ticker derived from `endsAtMs`:
+
+```ts
+export function useGoldenVoteCountdown(endsAtMs: number | null): number {
+  const [secondsLeft, setSecondsLeft] = useState(0);
+  useEffect(() => {
+    if (endsAtMs == null) { setSecondsLeft(0); return; }
+    const update = () => setSecondsLeft(Math.max(0, Math.ceil((endsAtMs - Date.now()) / 1000)));
+    update();
+    const id = setInterval(update, 250);
+    return () => clearInterval(id);
+  }, [endsAtMs]);
+  return secondsLeft;
+}
+```
+
+**`src/broadcast/GoldenVotePanel.tsx`** — conditional overlay card:
+
+- Returns `null` when `view.state === "Idle"`.
+- During `Voting`: gold-bordered pulsing card with 🟡 GOLDEN GUN VOTE title, big countdown (32px), one bar per alive player (team color dot, name, animated gold gradient bar showing `tally[id] / totalVotes`, vote count), and "N votes cast" total.
+- During `Reveal`: replaces card with "🏆 WINNER: <name>" (40px bold) over gold-tinted backdrop. Auto-dismisses when tick flips back to Idle.
+
+Mount inside `BroadcastView` as absolute-positioned overlay across the top of the grid area:
+
+```tsx
+{goldenVote.state !== "Idle" ? (
+  <div style={{
+    position: "absolute", top: 76, left: 16, right: 356,
+    zIndex: 3, pointerEvents: "none",
+  }}>
+    <GoldenVotePanel view={goldenVote} players={players} />
+  </div>
+) : null}
+```
+
+**`src/broadcast/MatchScoreBar.tsx`** — accept optional `right?: ReactNode` slot:
+
+```ts
+interface MatchScoreBarProps {
+  match: GameMatch | undefined;
+  style?: React.CSSProperties;
+  right?: React.ReactNode;
+}
+```
+
+Renders the slot to the right of the timer cell with `gap: 14`.
+
+**`src/broadcast/BroadcastView.tsx`** — wire the operator button into the right slot:
+
+```tsx
+const onStartVote = useCallback(() => {
+  if (!conn) return;
+  conn.reducers.startGoldenVote({}).catch((e) => {
+    console.warn("[broadcast] start_golden_vote rejected:", e);
+  });
+}, [conn]);
+
+// Button is shown whenever no vote is in flight; server enforces Live state.
+const operatorSlot =
+  goldenVote.state === "Voting" ? (
+    <span style={statusPillStyle}>VOTING · {secondsLeftForButton}s</span>
+  ) : goldenVote.state === "Reveal" ? (
+    <span style={statusPillStyle}>WINNER REVEAL</span>
+  ) : (
+    <button onClick={onStartVote} style={goldButtonStyle}>🟡 Start Golden Vote</button>
+  );
+
+<MatchScoreBar match={match} right={operatorSlot} />
+```
+
+### 7.5 Mobile spectator vote bar
+
+**`src/spectator/mobile/GoldenVoteBar.tsx`** — top-of-screen banner shown only when vote is active:
+
+- Returns `null` when `view.state === "Idle"`.
+- During `Voting`: position `absolute top:0`, gold-tinted background, header with countdown, horizontal scrolling row of alive-player chips. Each chip = team color dot + name + vote-count badge. Tapping a chip calls `conn.reducers.castGoldenVote({ targetPlayerId: id })`. The chip the user has currently voted for is highlighted with a 2px gold ring.
+- During `Reveal`: replaces banner with "🏆 <name> wins the Golden Gun!" centered for 5s.
+
+Mount inside `MobileSpectator` as the last layer above the canvas and controls but below `RotateHint`:
+
+```tsx
+<GoldenVoteBar view={goldenVote} players={players} conn={conn} />
+```
+
+### 7.6 Gun variant swap
+
+The visual `GunVariant = "golden"` already exists in `src/Gun.tsx` (defined since before this work, just never used). Three swap points:
+
+**`src/multiplayer/MultiplayerGame.tsx`** — `LocalPlayerRig` + `RemotePlayerRig`:
+
+```tsx
+const gunVariant = player.hasGoldenGun ? "golden" : "normal";
+<FitModel
+  /* ... */
+  hold={<Gun length={0.22} variant={gunVariant} />}
+/>
+```
+
+**`src/game/FpvArms.tsx`** — accept a `variant?: GunVariant` prop and thread to the held gun:
+
+```tsx
+interface FpvArmsProps {
+  variant?: GunVariant;
+}
+export function FpvArms({ variant = "normal" }: FpvArmsProps = {}) {
+  // ... existing logic ...
+  <AnimatedCharacter
+    url="/models/character_a.glb"
+    animState={anim}
+    hold={<Gun length={0.22} variant={variant} />}
+  />
+}
+```
+
+**`src/multiplayer/MultiplayerGame.tsx`** — pass the variant into the FPV arms when the local player holds the gold:
+
+```tsx
+{joined && localPlayer?.alive ? (
+  <AssetBoundary>
+    <FpvArms variant={localPlayer.hasGoldenGun ? "golden" : "normal"} />
+  </AssetBoundary>
+) : null}
+```
+
+So the wielder sees gold in first person + everyone else sees gold in third person, all driven by the same networked `players.has_golden_gun` field.
+
+### 7.7 Files added/modified
+
+**New:**
+- `src/broadcast/GoldenVotePanel.tsx`
+- `src/broadcast/useGoldenVoteCountdown.ts`
+- `src/spectator/mobile/GoldenVoteBar.tsx`
+- `src/stdb/golden_votes_table.ts` (regenerated)
+- `src/stdb/cast_golden_vote_reducer.ts` (regenerated)
+- `src/stdb/start_golden_vote_reducer.ts` (regenerated)
+
+**Modified:**
+- `server/src/lib.rs` — schema, two reducers, helper, tick branch, fire change, on_disconnect cleanup, init + join field initialization.
+- `src/net/Connection.ts` — `golden_votes` added to default subscriptions.
+- `src/net/useValor.ts` — `useGoldenVote` hook.
+- `src/broadcast/BroadcastView.tsx` — mount `<GoldenVotePanel>` + operator slot.
+- `src/broadcast/MatchScoreBar.tsx` — optional `right` slot.
+- `src/spectator/MobileSpectator.tsx` — mount `<GoldenVoteBar>`.
+- `src/multiplayer/MultiplayerGame.tsx` — gun variant swap (Local + Remote rigs + FpvArms call).
+- `src/game/FpvArms.tsx` — `variant?: GunVariant` prop.
+
+**Not touched:**
+- `src/caster/CasterLive.tsx` — operator runs the vote from `#broadcast` directly.
+- `src/Gun.tsx` — the gold variant material palette already existed.
+
+### 7.8 Operator flow during a demo
+
+1. Players join `#multiplayer` (need at least 2 on opposite teams; tick auto-starts the round).
+2. Operator opens `#broadcast` on a laptop or projector.
+3. Phone spectators scan the QR on the broadcast's right rail → land on `#spectator` (mobile ghost-cam).
+4. Operator clicks **🟡 Start Golden Vote** in the top-right of the score bar.
+5. Mobile spectators see a banner appear, tap their chosen player. They can re-tap to switch within the 20s window.
+6. At 0s: broadcast shows "🏆 WINNER: <name>" for 5s. Winner's `players.has_golden_gun` flips true.
+7. Multiplayer clients re-render the winner's Gun as gold (first-person + third-person). Any shot they fire = instant kill.
+8. Winner dies → `has_golden_gun` flips false in the same `fire` reducer update → gun reverts to normal.
+
+### 7.9 Edge cases handled
+
+- **No votes cast**: tally empty → winner is `None` → broadcast shows "🤷 No winner", mobile banner same, no `has_golden_gun` is set.
+- **Winner dies during the 5s Reveal**: gun was never awarded (because the gun-flip happens inside the same tally block — if the winner died between the start of Voting and finalize, they're filtered out by the `p.alive` predicate in `max_by`).
+- **Operator clicks Start while a vote is in flight**: server returns `Err("vote already in flight")`; button is replaced with a status pill so the operator can't double-click anyway.
+- **Operator clicks Start during Lobby/RoundEnd**: server returns `Err("vote only during Live rounds")`. UI button stays visible (intentional, as an affordance) but rejection is logged to console.
+- **Spectator votes for a dead player**: server returns `Err("target is not alive")`. The mobile bar filters its chip list to alive players only, so this should only happen if a player dies mid-tap.
+- **Spectator's tab closes during voting**: `on_disconnect` deletes their `golden_votes` row, so the tally adjusts downward.
+
+---
+
+## 8. All routes summary
 
 | Route | What it is |
 |---|---|
 | `/` | Lobby — character select + Play |
-| `/#multiplayer` | Networked play (Phase 5) — now with QR corner badge |
+| `/#multiplayer` | Networked play (Phase 5) — now with QR corner badge. Gun renders gold + one-shots when `players.has_golden_gun` is true. |
 | `/#caster/live` | Operator panel — start/stop, status, scrolling commentary — now with QR corner badge + "👁 N watching" pill |
 | `/#caster` | Tier 1 mock caster demo |
 | `/#leaderboard` | Leaderboard view |
-| `/#spectator` | Desktop fixed CasterCam (unchanged) **OR** mobile ghost-cam (new, on touch / `?mobile=1`) |
+| `/#spectator` | Desktop fixed CasterCam (unchanged) **OR** mobile ghost-cam with Golden Vote bar (new, on touch / `?mobile=1`) |
 | `/#spectator/freefly` | Desktop drei OrbitControls spectator (unchanged) |
-| `/#broadcast` | **NEW** — 2×2 POV grid + commentary rail + QR — wall display |
+| `/#broadcast` | **NEW** — 2×2 POV grid + commentary rail + QR — wall display. Top-right of score bar: 🟡 Start Golden Vote button. Gold vote overlay across top of grid when vote is active. |
 | `/#join` | **NEW** — full-screen QR wall for projecting "scan to spectate" |
 | `/#studio` | Model studio |
 
 ---
 
-## 8. Dependencies added
+## 9. Dependencies added
 
 ```json
 {
@@ -555,12 +1059,12 @@ That's it. No new server-side dependencies.
 
 ---
 
-## 9. Verification
+## 10. Verification
 
 Steps to confirm everything works after rebuild:
 
 1. **Build the Rust module**: `cd server && cargo build --release --target wasm32-unknown-unknown`.
-2. **Publish**: `spacetime publish -s maincloud -p server --yes=remote valor-xv83g`.
+2. **Publish**: `spacetime publish -s maincloud -p server --yes=remote,delete-data --delete-data valor-xv83g` (the `--delete-data` flag is required when the Golden Gun schema additions land for the first time; once the live schema matches, future publishes can drop it).
 3. **Regenerate bindings**: `spacetime generate --lang typescript --out-dir src/stdb --module-path server`.
 4. **Typecheck**: `npx tsc --noEmit` — must be clean.
 5. **Dev server**: `npm run dev -- --host` — prints LAN IP.
@@ -570,26 +1074,30 @@ Steps to confirm everything works after rebuild:
 9. **Spectators table**: `spacetime sql -s maincloud valor-xv83g "SELECT * FROM spectators"` — should show one row per connected phone, deleted on tab close.
 10. **Broadcast**: open the tunnel URL `/#broadcast` — 2×2 grid populates with up to 4 alive players' POVs, top bar shows live score, right rail scrolls commentary, QR badge at the bottom encodes the same tunnel URL.
 11. **Caster count**: open `/#caster/live` → click Start live caster → confirm "👁 N watching" pill increments with each connected phone spectator.
+12. **Golden Gun**: with at least 2 alive players on opposite teams (match auto-enters Live), open `/#broadcast` and click **🟡 Start Golden Vote** in the top-right of the score bar. Phone spectators see a gold banner appear and tap a player chip. After 20s, the winner is announced and their next shot one-shots an enemy.
+    - SQL probe: `spacetime sql -s maincloud valor-xv83g "SELECT * FROM golden_votes"` shows each spectator's vote; `SELECT has_golden_gun FROM players` flips to `true` for the winner.
 
 ---
 
-## 10. Known gotchas
+## 11. Known gotchas
 
 - **QR encoding URL**: `<QrJoinBadge>` derives from `window.location.origin`. If you load the broadcast page on `localhost`, the QR encodes `localhost` and phones can't reach it. Always load the page from a phone-reachable origin (tunnel, LAN IP, or deployed URL) for the QR to work.
 - **Drei `<View>` ref**: the DOM tile and the R3F `<View>` must share the same `ref`. The `<View>` must live inside `<Canvas>`; the DOM tile must live outside. Splitting `PovTile` / `PovTileView` keeps this clean.
-- **`spectator_join` rejection**: if the server has not been republished with the new reducers, the promise rejects with "no such reducer". The mobile spectator code wraps the call in `.catch(...)` so this is silent. The UI continues to work; only the `spectators` table stays empty.
+- **`spectator_join` / `cast_golden_vote` rejection**: if the server has not been republished with the new reducers, the promise rejects with "no such reducer". Both the mobile spectator and the broadcast wrap calls in `.catch(...)` so this is silent. The UI continues to work; only the corresponding table (`spectators` / `golden_votes`) stays empty.
 - **iOS Safari fullscreen**: Apple does not let regular web pages hide the Safari URL bar. The RotateHint shows an "Add to Home Screen" tip when iOS Safari is detected; that's the only way to get true fullscreen on iPhone.
 - **iOS Safari orientation lock**: `screen.orientation.lock("landscape")` is rejected on iOS Safari even after fullscreen attempt. The RotateHint covers this case with the rotate-your-phone overlay.
 - **StrictMode double-mount**: `useValorConnection` has a guard but can still race in some headless / cold-start environments. In a real browser it settles within ~2s. The smoke harness from earlier (deleted) hit this; manual testing did not.
-- **Stale localStorage token**: if the user previously connected to a Maincloud identity that's since been revoked (e.g. after `spacetime logout`), the next connect fails with "Failed to verify token: Unauthorized". Fix: `localStorage.removeItem('valor.stdb.token'); location.reload();` in DevTools.
+- **Stale localStorage token**: if the user previously connected to a Maincloud identity that's since been revoked (e.g. after `spacetime logout` OR after a `--delete-data` republish), the next connect fails with "Failed to verify token: Unauthorized" or surfaces as a generic "[object Event]" error on the broadcast. Fix: `localStorage.removeItem('valor.stdb.token'); location.reload();` in DevTools. Do this on **every** open tab after a Maincloud wipe.
+- **Publish silently no-ops**: occasionally `spacetime publish` says `Updated database` but the new schema isn't actually live (observed during Golden Gun development). Probe with `spacetime sql -s maincloud valor-xv83g "SELECT * FROM <new_table>"` — if it errors with `no such table`, run `cargo clean -p valor --manifest-path server/Cargo.toml --target wasm32-unknown-unknown` and republish.
+- **Golden Gun requires Live state**: `start_golden_vote` rejects with `"vote only during Live rounds"` when the match is in Lobby or RoundEnd. Need at least 2 alive players on opposite teams so `tick` auto-starts a round.
 
 ---
 
-## 11. Recovery order
+## 12. Recovery order
 
 If `aidan` is gone and you're rebuilding from `main`, do it in this order:
 
-1. **Server first**: add the two reducers + extend `on_disconnect` (`server/src/lib.rs`). Publish + regenerate.
+1. **Server first (spectators)**: add the two reducers + extend `on_disconnect` (`server/src/lib.rs`). Publish + regenerate.
 2. **Connection layer**: add `spectators` to `DEFAULT_QUERIES` in `Connection.ts`. Add `useSpectatorCount` to `useValor.ts`.
 3. **Shared util**: create `src/spectator/touch.ts`.
 4. **Export `SpectatorScene`** from `CasterCam.tsx` (one-word change — `export function`).
@@ -598,6 +1106,8 @@ If `aidan` is gone and you're rebuilding from `main`, do it in this order:
 7. **Caster count**: wire `useSpectatorCount` into `CasterLive.tsx` header.
 8. **Broadcast view**: build `useFollowCam.ts`, `useFeaturedPlayers.ts`, `CommentaryRail.tsx`, `MatchScoreBar.tsx`, `BroadcastErrorBanner.tsx`, then `PovTile.tsx` (split into two exports), then `BroadcastView.tsx`. Add `#broadcast` to `main.tsx`.
 9. **Mobile hygiene**: `index.html` viewport meta + CSS, `vite.config.ts` `allowedHosts`.
-10. **Verify** per section 9 above.
+10. **Golden Gun (server)**: add `has_golden_gun` to Player, `golden_vote_state` / `golden_vote_ends_at` / `golden_vote_winner_id` to GameMatch, `GoldenVoteState` enum, `golden_votes` table. Add `start_golden_vote` + `cast_golden_vote` + `finalize_golden_vote` helper. Extend `tick` + `fire` + `on_disconnect` + `init` + `join`. Publish with `--delete-data` + regenerate.
+11. **Golden Gun (client)**: add `golden_votes` to `DEFAULT_QUERIES`. Add `useGoldenVote` to `useValor.ts`. Build `useGoldenVoteCountdown.ts`, `GoldenVotePanel.tsx`, `GoldenVoteBar.tsx`. Add `right` slot to `MatchScoreBar.tsx`. Wire the panel + button into `BroadcastView.tsx`. Wire the bar into `MobileSpectator.tsx`. Swap Gun variant in `MultiplayerGame.tsx` (Local + Remote rigs + FpvArms). Add `variant?: GunVariant` prop to `FpvArms.tsx`.
+12. **Verify** per section 10 above.
 
-Each step is independent enough to land + verify on its own.
+Each step is independent enough to land + verify on its own. Steps 1–9 produce a working spectator + broadcast without the Golden Gun. Steps 10–11 layer the vote feature on top.

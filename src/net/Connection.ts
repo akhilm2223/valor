@@ -37,6 +37,7 @@ const DEFAULT_QUERIES = [
   "SELECT * FROM commentary",
   "SELECT * FROM leaderboard",
   "SELECT * FROM spectators",
+  "SELECT * FROM golden_votes",
 ];
 
 export function connectValor(opts: ConnectOpts = {}): ValorConnection {

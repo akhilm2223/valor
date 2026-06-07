@@ -54,8 +54,28 @@ export const GameMatch = __t.object("GameMatch", {
     return MatchState;
   },
   roundEndTimestamp: __t.timestamp(),
+  get goldenVoteState() {
+    return GoldenVoteState;
+  },
+  goldenVoteEndsAt: __t.i64(),
+  goldenVoteWinnerId: __t.u32(),
 });
 export type GameMatch = __Infer<typeof GameMatch>;
+
+export const GoldenVote = __t.object("GoldenVote", {
+  voterIdentity: __t.identity(),
+  targetPlayerId: __t.u32(),
+  castAt: __t.timestamp(),
+});
+export type GoldenVote = __Infer<typeof GoldenVote>;
+
+// The tagged union or sum type for the algebraic type `GoldenVoteState`.
+export const GoldenVoteState = __t.enum("GoldenVoteState", {
+  Idle: __t.unit(),
+  Voting: __t.unit(),
+  Reveal: __t.unit(),
+});
+export type GoldenVoteState = __Infer<typeof GoldenVoteState>;
 
 export const LeaderboardRow = __t.object("LeaderboardRow", {
   id: __t.u64(),
@@ -98,6 +118,7 @@ export const Player = __t.object("Player", {
     return AnimState;
   },
   kills: __t.u32(),
+  hasGoldenGun: __t.bool(),
 });
 export type Player = __Infer<typeof Player>;
 

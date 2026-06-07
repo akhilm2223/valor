@@ -14,9 +14,15 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Canvas } from "@react-three/fiber";
-import { useValorConnection, usePlayers } from "../net/useValor";
+import {
+  useGameMatch,
+  useGoldenVote,
+  useValorConnection,
+  usePlayers,
+} from "../net/useValor";
 import { SpectatorScene } from "./CasterCam";
 import { MobileControls } from "./mobile/MobileControls";
+import { GoldenVoteBar } from "./mobile/GoldenVoteBar";
 import { RotateHint } from "./mobile/RotateHint";
 import {
   useMobileGhostCam,
@@ -92,8 +98,10 @@ function SwipeCapture({
 }
 
 export function MobileSpectator() {
-  const { conn, status, error } = useValorConnection();
+  const { conn, status, error, identity } = useValorConnection();
   const players = usePlayers(conn);
+  const match = useGameMatch(conn);
+  const goldenVote = useGoldenVote(conn, identity, match);
 
   // Portrait detection — we tell the user to rotate. matchMedia is the most
   // reliable signal across iOS Safari + Android Chrome. We fall back to
@@ -387,6 +395,10 @@ export function MobileSpectator() {
             ? `error: ${error?.message ?? "unknown"}`
             : "connecting…"}
       </div>
+
+      {/* Golden Gun vote banner — top of screen, only when vote is active.
+          Returns null in Idle, so the spectator layout is unchanged otherwise. */}
+      <GoldenVoteBar view={goldenVote} players={players} conn={conn} />
 
       {/* Portrait → "rotate your phone" overlay. Last child so it stacks on
           top of all the controls and the canvas. */}

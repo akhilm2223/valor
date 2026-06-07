@@ -1,4 +1,5 @@
 use spacetimedb::{Identity, ReducerContext, ScheduleAt, SpacetimeType, Table, Timestamp};
+use std::collections::HashMap;
 
 // =============================================================================
 // Constants (mirror client-side numbers from GameView.tsx so server-authoritative
@@ -21,6 +22,10 @@ const MAX_RANGE: f32 = 60.0;
 const ROUND_LEN_MS: u64 = 75_000;
 const ROUND_END_COOLDOWN_MS: i64 = 5_000; // post-round pause before auto-restart
 const MATCH_LENGTH_ROUNDS: u32 = 5; // after this many rounds match ends (no auto-restart)
+
+// Golden Gun vote (spectator-driven special event).
+const GOLDEN_VOTE_WINDOW_MS: i64 = 20_000; // 20s voting window
+const GOLDEN_REVEAL_MS: i64 = 5_000; // 5s winner reveal before returning to Idle
 
 // Team spawn points (Z separates A from B; arena is roughly XY square at y=0).
 const SPAWN_A: Vec3 = Vec3 { x: 0.0, y: 0.0, z: 8.0 };
@@ -67,6 +72,16 @@ pub enum MatchState {
     MatchEnd,
 }
 
+// Golden Gun vote state machine, runs orthogonally to MatchState. Idle is the
+// resting state — the broadcast + mobile spectator render nothing extra.
+#[derive(SpacetimeType, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum GoldenVoteState {
+    #[default]
+    Idle,
+    Voting,
+    Reveal,
+}
+
 #[derive(SpacetimeType, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommentaryKind {
     Bark,
@@ -97,6 +112,11 @@ pub struct Player {
     pub anim_state: AnimState,
     // Cumulative match kills for this player. Drives leaderboard team_a/b_kills.
     pub kills: u32,
+    // True while this player is wielding the spectator-voted Golden Gun. Set
+    // by tick() when a vote concludes; cleared when the wielder dies. The
+    // multiplayer client swaps Gun.tsx to variant="golden" when this is true;
+    // the fire reducer applies an instant-kill damage modifier.
+    pub has_golden_gun: bool,
 }
 
 // Singleton: id is always 0
@@ -113,6 +133,13 @@ pub struct GameMatch {
     // When tick() flipped state to RoundEnd. tick() uses this for the 5s cooldown
     // before auto-calling start_round() again. Init=epoch (=0 micros).
     pub round_end_timestamp: Timestamp,
+    // Golden Gun vote state. Defaults: Idle / 0 / 0. While Voting,
+    // golden_vote_ends_at is the wall-clock micros-since-epoch at which tick()
+    // tallies and flips to Reveal. While Reveal, golden_vote_ends_at is when
+    // tick() flips back to Idle. winner_id == 0 means "no winner" (no votes).
+    pub golden_vote_state: GoldenVoteState,
+    pub golden_vote_ends_at: i64,
+    pub golden_vote_winner_id: u32,
 }
 
 #[spacetimedb::table(accessor = shots, public)]
@@ -133,6 +160,19 @@ pub struct Spectator {
     #[primary_key]
     pub identity: Identity,
     pub joined_at: Timestamp,
+}
+
+// Golden Gun votes — one row per spectator who has cast a vote in the current
+// cycle. PK on voter_identity gives us "one vote per voter, switchable"
+// without extra bookkeeping (re-cast is an UPDATE). Cleared by
+// start_golden_vote() at the beginning of each cycle and by on_disconnect()
+// when a voter's tab closes.
+#[spacetimedb::table(accessor = golden_votes, public)]
+pub struct GoldenVote {
+    #[primary_key]
+    pub voter_identity: Identity,
+    pub target_player_id: u32,
+    pub cast_at: Timestamp,
 }
 
 #[spacetimedb::table(accessor = leaderboard, public)]
@@ -183,6 +223,9 @@ pub fn init(ctx: &ReducerContext) {
         round_timer_ms: 0,
         state: MatchState::Lobby,
         round_end_timestamp: Timestamp::from_micros_since_unix_epoch(0),
+        golden_vote_state: GoldenVoteState::Idle,
+        golden_vote_ends_at: 0,
+        golden_vote_winner_id: 0,
     });
 
     let interval = spacetimedb::TimeDuration::from_micros(33_000);
@@ -232,6 +275,7 @@ pub fn join(ctx: &ReducerContext, name: String) {
         alive: true,
         anim_state: AnimState::Idle,
         kills: 0,
+        has_golden_gun: false,
     });
 }
 
@@ -327,8 +371,19 @@ pub fn fire(ctx: &ReducerContext, aim_vector: Vec3) {
         }
     }
 
+    // Golden Gun: if the shooter has the gun, damage equals the victim's
+    // current HP — instant kill regardless of remaining health. Otherwise
+    // standard SHOT_DAMAGE applies. (Computed inline because we need the
+    // victim's HP, which is looked up after the raycast resolves.)
     let (hit, victim_id, damage) = match best {
-        Some((vid, _)) => (true, Some(vid), SHOT_DAMAGE),
+        Some((vid, _)) => {
+            let dmg = if shooter.has_golden_gun {
+                ctx.db.players().id().find(vid).map(|v| v.health).unwrap_or(SHOT_DAMAGE)
+            } else {
+                SHOT_DAMAGE
+            };
+            (true, Some(vid), dmg)
+        }
         None => (false, None, 0),
     };
 
@@ -350,6 +405,8 @@ pub fn fire(ctx: &ReducerContext, aim_vector: Vec3) {
                 health: new_health,
                 alive: now_alive,
                 anim_state: if now_alive { AnimState::Hit } else { AnimState::Death },
+                // If the wielder dies, the Golden Gun is consumed.
+                has_golden_gun: now_alive && victim.has_golden_gun,
                 ..victim.clone()
             });
 
@@ -406,6 +463,27 @@ pub fn tick(ctx: &ReducerContext, _arg: TickSchedule) {
         });
     }
 
+    let Some(m) = ctx.db.game_match().id().find(0) else { return };
+
+    // Golden Gun vote state machine — runs orthogonally to round state. Both
+    // transitions are time-driven; finalize_golden_vote handles tally + award.
+    let now_us = ctx.timestamp.to_micros_since_unix_epoch();
+    match m.golden_vote_state {
+        GoldenVoteState::Voting if now_us >= m.golden_vote_ends_at => {
+            finalize_golden_vote(ctx, &m);
+        }
+        GoldenVoteState::Reveal if now_us >= m.golden_vote_ends_at => {
+            ctx.db.game_match().id().update(GameMatch {
+                golden_vote_state: GoldenVoteState::Idle,
+                golden_vote_ends_at: 0,
+                golden_vote_winner_id: 0,
+                ..m.clone()
+            });
+        }
+        _ => {}
+    }
+
+    // Re-read in case finalize_golden_vote / reveal-end changed the row.
     let Some(m) = ctx.db.game_match().id().find(0) else { return };
 
     match m.state {
@@ -572,6 +650,116 @@ pub fn spectator_leave(ctx: &ReducerContext) {
     ctx.db.spectators().identity().delete(ctx.sender());
 }
 
+// =============================================================================
+// Golden Gun vote — spectator-driven special event.
+//
+// Flow:
+//   • Broadcast operator clicks "Start Golden Vote" -> start_golden_vote().
+//   • Phone spectators tap a player chip -> cast_golden_vote(target_player_id).
+//     PK on voter_identity makes the vote switchable (re-cast = update).
+//   • tick() watches golden_vote_ends_at; when window expires, finalize() tallies
+//     and awards has_golden_gun to the leader, transitioning to Reveal.
+//   • After GOLDEN_REVEAL_MS, tick() flips back to Idle.
+//   • Gun is consumed on the wielder's death (fire reducer + on_disconnect).
+// =============================================================================
+
+#[spacetimedb::reducer]
+pub fn start_golden_vote(ctx: &ReducerContext) -> Result<(), String> {
+    let Some(m) = ctx.db.game_match().id().find(0) else { return Err("no match".into()) };
+    if m.state != MatchState::Live {
+        return Err("vote only during Live rounds".into());
+    }
+    if m.golden_vote_state != GoldenVoteState::Idle {
+        return Err("vote already in flight".into());
+    }
+    // Clear any leftover vote rows from a previous cycle.
+    let stale: Vec<Identity> = ctx.db.golden_votes().iter().map(|v| v.voter_identity).collect();
+    for id in stale {
+        ctx.db.golden_votes().voter_identity().delete(id);
+    }
+    // Clear any stale gun flag (shouldn't happen, but defensive).
+    let armed: Vec<Player> = ctx.db.players().iter().filter(|p| p.has_golden_gun).collect();
+    for p in armed {
+        ctx.db.players().id().update(Player { has_golden_gun: false, ..p });
+    }
+    let ends_at = ctx.timestamp.to_micros_since_unix_epoch() + GOLDEN_VOTE_WINDOW_MS * 1000;
+    ctx.db.game_match().id().update(GameMatch {
+        golden_vote_state: GoldenVoteState::Voting,
+        golden_vote_ends_at: ends_at,
+        golden_vote_winner_id: 0,
+        ..m
+    });
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn cast_golden_vote(ctx: &ReducerContext, target_player_id: u32) -> Result<(), String> {
+    let Some(m) = ctx.db.game_match().id().find(0) else { return Err("no match".into()) };
+    if m.golden_vote_state != GoldenVoteState::Voting {
+        return Err("no vote in flight".into());
+    }
+    let Some(target) = ctx.db.players().id().find(target_player_id) else {
+        return Err("no such player".into());
+    };
+    if !target.alive {
+        return Err("target is not alive".into());
+    }
+    let voter = ctx.sender();
+    if let Some(existing) = ctx.db.golden_votes().voter_identity().find(voter) {
+        ctx.db.golden_votes().voter_identity().update(GoldenVote {
+            target_player_id,
+            cast_at: ctx.timestamp,
+            ..existing
+        });
+    } else {
+        ctx.db.golden_votes().insert(GoldenVote {
+            voter_identity: voter,
+            target_player_id,
+            cast_at: ctx.timestamp,
+        });
+    }
+    Ok(())
+}
+
+// Helper: tally votes, award gun to leader, transition Voting -> Reveal. Called
+// from tick() when the voting window expires. Ties broken by lowest id
+// (deterministic). Winner must still be alive at tally time; otherwise we
+// pick the next-best living candidate. If no living candidate has votes,
+// winner_id stays 0 ("NO WINNER" splash on the broadcast).
+fn finalize_golden_vote(ctx: &ReducerContext, m: &GameMatch) {
+    let mut tally: HashMap<u32, u32> = HashMap::new();
+    for v in ctx.db.golden_votes().iter() {
+        *tally.entry(v.target_player_id).or_insert(0) += 1;
+    }
+    let winner: Option<u32> = tally
+        .into_iter()
+        .filter(|(pid, _)| {
+            ctx.db.players().id().find(*pid).map(|p| p.alive).unwrap_or(false)
+        })
+        // Highest vote count wins; ties broken by lowest player id.
+        .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
+        .map(|(pid, _)| pid);
+    if let Some(wid) = winner {
+        if let Some(p) = ctx.db.players().id().find(wid) {
+            let winner_name = p.name.clone();
+            ctx.db.players().id().update(Player { has_golden_gun: true, ..p });
+            ctx.db.commentary().insert(Commentary {
+                id: 0,
+                kind: CommentaryKind::Bark,
+                text: format!("{} wins the Golden Gun!", winner_name),
+                created_at: ctx.timestamp,
+            });
+        }
+    }
+    let reveal_ends_at = ctx.timestamp.to_micros_since_unix_epoch() + GOLDEN_REVEAL_MS * 1000;
+    ctx.db.game_match().id().update(GameMatch {
+        golden_vote_state: GoldenVoteState::Reveal,
+        golden_vote_ends_at: reveal_ends_at,
+        golden_vote_winner_id: winner.unwrap_or(0),
+        ..m.clone()
+    });
+}
+
 #[spacetimedb::reducer(client_connected)]
 pub fn on_connect(_ctx: &ReducerContext) {}
 
@@ -581,10 +769,14 @@ pub fn on_disconnect(ctx: &ReducerContext) {
     if let Some(p) = ctx.db.players().identity().find(me) {
         ctx.db.players().id().update(Player {
             alive: false,
+            // Disconnecting forfeits the gun, same as dying.
+            has_golden_gun: false,
             ..p
         });
     }
     ctx.db.spectators().identity().delete(me);
+    // Drop any active golden-gun vote from this identity.
+    ctx.db.golden_votes().voter_identity().delete(me);
 }
 
 // =============================================================================

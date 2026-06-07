@@ -145,12 +145,15 @@ function teamLabel(t: Team): string {
 function LocalPlayerRig({ player }: { player: Player | undefined }) {
   if (!player) return null;
   const yaw = Math.atan2(player.aimVector.x, player.aimVector.z) + Math.PI;
+  // Server flips player.hasGoldenGun = true when this player wins a spectator
+  // vote. The render switches to the gold variant defined in src/Gun.tsx.
+  const gunVariant = player.hasGoldenGun ? "golden" : "normal";
   return (
     <group position={[player.position.x, player.position.y, player.position.z]} rotation={[0, yaw, 0]}>
       <FitModel
         url={decodeName(player.name).modelUrl}
         height={1.8}
-        hold={<Gun length={0.22} variant="normal" />}
+        hold={<Gun length={0.22} variant={gunVariant} />}
         animation={clipFor(player.animState)}
         castShadow
       />
@@ -180,12 +183,13 @@ function RemotePlayerRig({ player, localTeam }: { player: Player; localTeam?: nu
   const ringColor = player.team === 0 ? "#4a90e2" : "#e25555";
   const sameTeam = localTeam !== undefined && player.team === localTeam;
   const [ox, oz] = sameTeam ? fanOffset(player.id) : [0, 0];
+  const gunVariant = player.hasGoldenGun ? "golden" : "normal";
   return (
     <group position={[player.position.x + ox, player.position.y, player.position.z + oz]} rotation={[0, yaw, 0]}>
       <FitModel
         url={decodeName(player.name).modelUrl}
         height={1.8}
-        hold={<Gun length={0.22} variant="normal" />}
+        hold={<Gun length={0.22} variant={gunVariant} />}
         animation={clipFor(player.animState)}
         castShadow
       />
@@ -792,7 +796,7 @@ export function MultiplayerGame() {
               load, the arms just don't show — the scene never goes black. */}
           {joined && localPlayer?.alive ? (
             <AssetBoundary>
-              <FpvArms />
+              <FpvArms variant={localPlayer.hasGoldenGun ? "golden" : "normal"} />
             </AssetBoundary>
           ) : null}
         </Suspense>

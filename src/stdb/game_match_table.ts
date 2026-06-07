@@ -11,6 +11,7 @@ import {
 } from "spacetimedb";
 import {
   MatchState,
+  GoldenVoteState,
 } from "./types";
 
 
@@ -24,4 +25,9 @@ export default __t.row({
     return MatchState;
   },
   roundEndTimestamp: __t.timestamp().name("round_end_timestamp"),
+  get goldenVoteState() {
+    return GoldenVoteState.name("golden_vote_state");
+  },
+  goldenVoteEndsAt: __t.i64().name("golden_vote_ends_at"),
+  goldenVoteWinnerId: __t.u32().name("golden_vote_winner_id"),
 });

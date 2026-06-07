@@ -188,6 +188,85 @@ export function useShots(conn: ValorConnection | null, limit = 50): Shot[] {
  * Newest-first window over the `leaderboard` table. `limit` defaults to 10 to
  * match the Leaderboard UI's recent-rounds cap.
  */
+// =============================================================================
+// Golden Gun vote — spectator-driven special event.
+// =============================================================================
+
+export type GoldenVoteStateTag = "Idle" | "Voting" | "Reveal";
+
+export interface GoldenVoteView {
+  state: GoldenVoteStateTag;
+  /** Wall-clock ms-since-epoch at which the current window ends. Callers
+   *  compute `secondsLeft` themselves so the countdown ticks independently of
+   *  STDB updates. `null` when state === "Idle". */
+  endsAtMs: number | null;
+  /** Player id → vote count. Updates as `golden_votes` rows insert/update/delete. */
+  tally: Map<number, number>;
+  /** Total votes cast (sum of tally values). */
+  totalVotes: number;
+  /** What THIS client (by identity) voted for. `null` if they haven't voted. */
+  myVoteTargetId: number | null;
+  /** Winner during Reveal. 0 = no winner. */
+  winnerId: number;
+}
+
+/**
+ * Live view of the Golden Gun vote state. Combines the `game_match` row's
+ * voting state machine with the `golden_votes` table tally + this client's
+ * own current vote (looked up by identity).
+ */
+export function useGoldenVote(
+  conn: ValorConnection | null,
+  identity: Identity | null,
+  match: GameMatch | undefined,
+): GoldenVoteView {
+  const [tally, setTally] = useState<Map<number, number>>(new Map());
+  const [myVote, setMyVote] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!conn) return;
+    const refresh = () => {
+      const t = new Map<number, number>();
+      let mine: number | null = null;
+      for (const v of conn.db.golden_votes.iter()) {
+        t.set(v.targetPlayerId, (t.get(v.targetPlayerId) ?? 0) + 1);
+        if (identity && v.voterIdentity.isEqual(identity)) {
+          mine = v.targetPlayerId;
+        }
+      }
+      setTally(t);
+      setMyVote(mine);
+    };
+    refresh();
+    const onAny = () => refresh();
+    conn.db.golden_votes.onInsert(onAny);
+    conn.db.golden_votes.onUpdate(onAny);
+    conn.db.golden_votes.onDelete(onAny);
+    return () => {
+      conn.db.golden_votes.removeOnInsert(onAny);
+      conn.db.golden_votes.removeOnUpdate(onAny);
+      conn.db.golden_votes.removeOnDelete(onAny);
+    };
+  }, [conn, identity]);
+
+  const stateTag = (match?.goldenVoteState?.tag ?? "Idle") as GoldenVoteStateTag;
+  // i64 micros → number ms. Math.floor avoids fractional ms.
+  const endsAtMs =
+    stateTag === "Idle" || !match
+      ? null
+      : Math.floor(Number(match.goldenVoteEndsAt) / 1000);
+  const totalVotes = Array.from(tally.values()).reduce((s, n) => s + n, 0);
+
+  return {
+    state: stateTag,
+    endsAtMs,
+    tally,
+    totalVotes,
+    myVoteTargetId: myVote,
+    winnerId: match?.goldenVoteWinnerId ?? 0,
+  };
+}
+
 /**
  * Live count of spectator rows on the `spectators` table. Used by the caster
  * overlay to show "👁 N watching" — pulled fresh from STDB so the count

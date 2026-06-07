@@ -38,4 +38,5 @@ export default __t.row({
     return AnimState.name("anim_state");
   },
   kills: __t.u32(),
+  hasGoldenGun: __t.bool().name("has_golden_gun"),
 });

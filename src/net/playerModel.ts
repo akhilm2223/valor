@@ -68,3 +68,16 @@ const TAG_RE = new RegExp(SEP + ".", "g");
 export function stripTags(text: string): string {
   return text.replace(TAG_RE, "");
 }
+
+// ── Team skins ─────────────────────────────────────────────────────────────
+// Skin is decided by TEAM, not by the player — no character picker. Team 0 wears
+// the Ranger (character_a), team 1 the Scout (character_b), so the two sides read
+// at a glance. Render rigs call skinForTeam(player.team); names go on the wire
+// plainly (no more model-in-name smuggling).
+export function skinForTeam(team: number | undefined): string {
+  return team === 1 ? MODELS[1].url : MODELS[0].url;
+}
+
+export function teamLabel(team: number | undefined): string {
+  return team === 1 ? MODELS[1].label : MODELS[0].label;
+}

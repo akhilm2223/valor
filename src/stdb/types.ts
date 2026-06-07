@@ -98,6 +98,8 @@ export const Player = __t.object("Player", {
     return AnimState;
   },
   kills: __t.u32(),
+  deaths: __t.u32(),
+  ready: __t.bool(),
 });
 export type Player = __Infer<typeof Player>;
 
@@ -110,6 +112,7 @@ export const Shot = __t.object("Shot", {
   hit: __t.bool(),
   victimId: __t.option(__t.u32()),
   damage: __t.u8(),
+  killed: __t.bool(),
   firedAt: __t.timestamp(),
 });
 export type Shot = __Infer<typeof Shot>;

@@ -44,8 +44,9 @@ import {
   useShots,
 } from "../net/useValor";
 import { ValorDriver } from "../net/Driver";
+import type { ValorConnection } from "../net/Connection";
 import type { Player, GameMatch, Shot } from "../net/Connection";
-import { encodeName, decodeName, DEFAULT_MODEL_URL } from "../net/playerModel";
+import { decodeName, skinForTeam } from "../net/playerModel";
 import type { AnimState } from "../stdb/types";
 import { createLiveKillStream, type LiveStreamController } from "../caster/LiveStream";
 import type { KillEvent, Team } from "../caster/MockMatch";
@@ -53,7 +54,6 @@ import { pickBark, renderBark } from "../caster/Barks";
 import { getSharedAudioQueue } from "../caster/AudioQueue";
 
 const NAME_KEY = "valor.player.name";
-const MODEL_KEY = "valor.player.model";
 
 // three-mesh-bvh: accelerate raycasts (the per-frame ground-snaps that walk the
 // heavy arena trimesh). Single-player patches these globally; the multiplayer
@@ -78,17 +78,6 @@ class AssetBoundary extends Component<{ children: ReactNode }, { failed: boolean
   }
   render() {
     return this.state.failed ? null : this.props.children;
-  }
-}
-
-/** The model the local player picked in the lobby (fallback to default). Sent
- *  encoded into the join name (see net/playerModel) so every client renders the
- *  right body for this player — the model is network-synced via the name field. */
-function selectedModel(): string {
-  try {
-    return localStorage.getItem(MODEL_KEY) ?? DEFAULT_MODEL_URL;
-  } catch {
-    return DEFAULT_MODEL_URL;
   }
 }
 
@@ -184,7 +173,7 @@ function LocalPlayerRig({ player }: { player: Player | undefined }) {
   return (
     <group position={[player.position.x, player.position.y, player.position.z]} rotation={[0, yaw, 0]}>
       <FitModel
-        url={decodeName(player.name).modelUrl}
+        url={skinForTeam(player.team)}
         height={1.8}
         hold={<Gun length={0.22} variant="normal" />}
         animation={clipFor(player.animState)}
@@ -282,7 +271,7 @@ function RemotePlayerRig({
   return (
     <group ref={groupRef}>
       <FitModel
-        url={decodeName(player.name).modelUrl}
+        url={skinForTeam(player.team)}
         height={1.8}
         hold={<Gun length={0.22} variant="normal" />}
         animation={clipFor(player.animState)}
@@ -736,7 +725,10 @@ function PlayerHud({ player }: { player: Player | undefined }) {
 }
 
 function KillFeed({ kills, playersById }: { kills: Shot[]; playersById: Map<number, Player> }) {
-  if (kills.length === 0) {
+  // ONE entry per kill: filter to the fatal shot (killed), not every hit — that's
+  // what made a 3-hit kill show three times ("dying multiple times").
+  const fatal = kills.filter((s) => s.killed);
+  if (fatal.length === 0) {
     return (
       <div style={hudTopRight}>
         <div style={hudLabel}>KILL FEED</div>
@@ -747,8 +739,7 @@ function KillFeed({ kills, playersById }: { kills: Shot[]; playersById: Map<numb
   return (
     <div style={hudTopRight}>
       <div style={hudLabel}>KILL FEED</div>
-      {kills
-        .filter((s) => s.victimId !== undefined && s.victimId !== null)
+      {fatal
         .map((s) => {
           const killer = playersById.get(s.shooterId);
           const victim = s.victimId !== undefined ? playersById.get(s.victimId) : undefined;
@@ -764,6 +755,95 @@ function KillFeed({ kills, playersById }: { kills: Shot[]; playersById: Map<numb
             </div>
           );
         })}
+    </div>
+  );
+}
+
+// Ready-up lobby. Shown while the match is in Lobby state (after you've joined).
+// Two team columns (skins are fixed by team), a ready badge per player, and a
+// READY toggle. The server starts the match only once both teams have a player
+// and EVERYONE is ready (see lib.rs all_ready).
+function LobbyPanel({
+  conn,
+  players,
+  localPlayer,
+}: {
+  conn: ValorConnection | null;
+  players: Player[];
+  localPlayer: Player | undefined;
+}) {
+  const teamA = players.filter((p) => p.team === 0);
+  const teamB = players.filter((p) => p.team === 1);
+  const myReady = localPlayer?.ready ?? false;
+  const bothTeams = teamA.length >= 1 && teamB.length >= 1;
+  const allReady = players.length > 0 && players.every((p) => p.ready);
+  const toggle = () => {
+    if (conn && localPlayer) conn.reducers.setReady({ ready: !myReady });
+  };
+
+  const Column = ({ label, color, roster }: { label: string; color: string; roster: Player[] }) => (
+    <div style={{ flex: 1, minWidth: 200 }}>
+      <div style={{ color, fontWeight: 800, fontSize: 14, letterSpacing: 1, marginBottom: 8 }}>{label}</div>
+      {roster.length === 0 ? (
+        <div style={{ opacity: 0.45, fontSize: 13, padding: "6px 0" }}>— empty —</div>
+      ) : (
+        roster.map((p) => (
+          <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 10px", marginBottom: 6, borderRadius: 8, background: "rgba(255,255,255,0.06)", border: localPlayer && p.id === localPlayer.id ? `1px solid ${color}` : "1px solid transparent" }}>
+            <span style={{ fontWeight: 600 }}>{decodeName(p.name).name || `P${p.id}`}</span>
+            <span style={{ fontSize: 12, fontWeight: 700, color: p.ready ? "#57e08a" : "#ffb454" }}>{p.ready ? "✓ READY" : "…"}</span>
+          </div>
+        ))
+      )}
+    </div>
+  );
+
+  return (
+    <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(8,10,13,0.72)", zIndex: 20 }}>
+      <div style={{ background: "rgba(18,22,27,0.97)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 16, padding: "26px 30px", minWidth: 460, maxWidth: 560, color: "#fff", fontFamily: "system-ui, sans-serif", boxShadow: "0 24px 70px rgba(0,0,0,0.6)" }}>
+        <div style={{ fontSize: 22, fontWeight: 800, marginBottom: 4 }}>Lobby</div>
+        <div style={{ opacity: 0.6, fontSize: 13, marginBottom: 18 }}>2v2 · teams auto-balance · skin is set by your team</div>
+        <div style={{ display: "flex", gap: 18, marginBottom: 18 }}>
+          <Column label="TEAM A · RANGER" color="#4a90e2" roster={teamA} />
+          <Column label="TEAM B · SCOUT" color="#e25555" roster={teamB} />
+        </div>
+        <div style={{ textAlign: "center", fontSize: 13, opacity: 0.8, marginBottom: 14, minHeight: 18 }}>
+          {!bothTeams ? "Waiting for an opponent to join…" : allReady ? "All ready — starting!" : "Waiting for everyone to ready up…"}
+        </div>
+        <button
+          onClick={toggle}
+          disabled={!localPlayer}
+          style={{ width: "100%", padding: "14px", fontSize: 16, fontWeight: 700, border: "none", borderRadius: 10, cursor: localPlayer ? "pointer" : "not-allowed", color: "#fff", background: myReady ? "#2f7d4f" : "#3a7bff" }}
+        >
+          {myReady ? "✓ READY — click to cancel" : "READY UP"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Center banner for round/match boundaries — shown to EVERYONE (winner included)
+// so the round end is obvious instead of "it just keeps going".
+function MatchBanner({ match, players }: { match: GameMatch | undefined; players: Player[] }) {
+  if (!match) return null;
+  const tag = match.state.tag;
+  if (tag !== "RoundEnd" && tag !== "MatchEnd") return null;
+  const aWins = match.scoreA > match.scoreB;
+  const text = tag === "MatchEnd"
+    ? `${aWins ? "TEAM A" : "TEAM B"} WINS THE MATCH`
+    : `ROUND ${match.round} OVER`;
+  const color = tag === "MatchEnd" ? (aWins ? "#4a90e2" : "#e25555") : "#fff";
+  // any alive player tells you the round's surviving side
+  void players;
+  return (
+    <div style={{ position: "absolute", top: "26%", left: 0, right: 0, textAlign: "center", pointerEvents: "none", zIndex: 8 }}>
+      <div style={{ display: "inline-block", background: "rgba(8,10,13,0.78)", border: "1px solid rgba(255,255,255,0.14)", borderRadius: 14, padding: "16px 28px", color, fontFamily: "system-ui, sans-serif" }}>
+        <div style={{ fontSize: 26, fontWeight: 800, letterSpacing: 1 }}>{text}</div>
+        <div style={{ fontSize: 16, fontWeight: 700, marginTop: 6, color: "#fff" }}>
+          <span style={{ color: "#4a90e2" }}>{match.scoreA}</span>
+          <span style={{ opacity: 0.6, margin: "0 10px" }}>—</span>
+          <span style={{ color: "#e25555" }}>{match.scoreB}</span>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1066,6 +1146,9 @@ export function MultiplayerGame() {
 
   // Join modal lifecycle.
   const [joined, setJoined] = useState(false);
+  // In an actual match (anything past the ready-up lobby) → show gameplay + mount
+  // the webcam; otherwise show the LobbyPanel.
+  const inMatch = joined && !!match && match.state.tag !== "Lobby";
   const onJoinSubmit = (name: string) => {
     if (!driverRef.current) return;
     // Browser autoplay gate — must run inside this click handler. unlock() arms
@@ -1076,7 +1159,7 @@ export function MultiplayerGame() {
     initAudio();
     // Encode the chosen model into the join name so it syncs to every client
     // (no server schema change needed — see net/playerModel).
-    driverRef.current.join(encodeName(name, selectedModel()));
+    driverRef.current.join(name); // plain name; skin is decided by team
     setJoined(true);
   };
 
@@ -1130,7 +1213,7 @@ export function MultiplayerGame() {
               load, the arms just don't show — the scene never goes black. */}
           {joined && localPlayer?.alive ? (
             <AssetBoundary>
-              <FpvArms animState={fpvAnimFor(localPlayer.animState)} />
+              <FpvArms animState={fpvAnimFor(localPlayer.animState)} url={skinForTeam(localPlayer.team)} />
             </AssetBoundary>
           ) : null}
           {/* Pooled muzzle flash + tracer renderer (same one single-player uses).
@@ -1153,15 +1236,19 @@ export function MultiplayerGame() {
       <PlayerHud player={localPlayer} />
       <KillFeed kills={shots} playersById={playersById} />
       <SpectatorOverlay localPlayer={localPlayer} match={match} />
+      <MatchBanner match={match} players={players} />
 
       {/* Crosshair — body-aim is coarse, so show where the camera points; turns
           red + "LOCKED" when aim-assist has an enemy and will bend the shot. */}
-      {joined && localPlayer?.alive ? <Crosshair locked={aimLocked} /> : null}
+      {inMatch && localPlayer?.alive ? <Crosshair locked={aimLocked} /> : null}
 
       {/* Webcam body control (DOM overlay — owns a <video>, must be OUTSIDE the
-          Canvas). Mounted only after joining so we don't grab the camera early.
-          Writes useControls, which VisionInputBridge consumes. */}
-      {joined ? <VisionController /> : null}
+          Canvas). Mounted once the match has actually started — NOT in the lobby
+          (the ready-up screen owns the screen there). Writes useControls. */}
+      {inMatch ? <VisionController /> : null}
+
+      {/* Ready-up lobby — after joining, before the match starts. */}
+      {joined && !inMatch ? <LobbyPanel conn={conn} players={players} localPlayer={localPlayer} /> : null}
 
       {!joined ? <JoinForm onSubmit={onJoinSubmit} status={status} error={error} /> : null}
 

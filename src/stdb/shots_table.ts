@@ -23,5 +23,6 @@ export default __t.row({
   hit: __t.bool(),
   victimId: __t.option(__t.u32()).name("victim_id"),
   damage: __t.u8(),
+  killed: __t.bool(),
   firedAt: __t.timestamp().name("fired_at"),
 });

@@ -99,8 +99,9 @@ export function createLiveKillStream(
 
   const onShotInsert = (_ctx: unknown, shot: Shot): void => {
     if (!running) return;
-    // A miss has victim_id == undefined (Rust Option::None over the wire).
-    if (shot.victimId === undefined || shot.victimId === null) return;
+    // Only the FATAL shot is a kill. Keying off victim_id (any hit) made the
+    // caster bark a 3-hit kill three times — use the server's `killed` flag.
+    if (!shot.killed || shot.victimId === undefined || shot.victimId === null) return;
 
     // Dedupe — the SDK can replay rows on resubscribe.
     const key = shotKey(shot);

@@ -32,7 +32,7 @@ const HIDE_BONES = new Set(["mixamorigHead", "mixamorigNeck"]);
 // entity store (resolveAnimState). Multiplayer has no local physics store, so it
 // passes the server-derived clip state directly — without this the MP arms were
 // frozen in idle even while walking/reloading.
-export function FpvArms({ animState }: { animState?: AnimState } = {}) {
+export function FpvArms({ animState, url = "/models/character_a.glb" }: { animState?: AnimState; url?: string } = {}) {
   const root = useRef<Group>(null);
   const rig = useRef<Group>(null);
   const camera = useThree((s) => s.camera);
@@ -74,7 +74,7 @@ export function FpvArms({ animState }: { animState?: AnimState } = {}) {
     <group ref={root}>
       <group ref={rig} position={RIG_POS} rotation={[0, RIG_YAW, 0]}>
         <AnimatedCharacter
-          url="/models/character_a.glb"
+          url={url}
           animState={anim}
           hold={<Gun length={0.22} variant="normal" />}
         />

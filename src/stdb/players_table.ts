@@ -38,4 +38,6 @@ export default __t.row({
     return AnimState.name("anim_state");
   },
   kills: __t.u32(),
+  deaths: __t.u32(),
+  ready: __t.bool(),
 });

@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "clean:dist": "node scripts/clean-dist.mjs",
+    "deploy": "npm run build && npm run clean:dist && npx surge dist valor-akhil-1v1.surge.sh",
     "preview": "vite preview",
     "test": "vitest run",
     "smoke": "node scripts/smoke.mjs",

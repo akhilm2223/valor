@@ -8,9 +8,11 @@ import { CasterLive } from "./caster/CasterLive";
 import { Leaderboard } from "./ui/Leaderboard";
 import { SpectatorRoute } from "./spectator/SpectatorRoute";
 import { MultiplayerGame } from "./multiplayer/MultiplayerGame";
+import { Lobby } from "./lobby/Lobby";
 
-// Eight screens (studio stays the default, animation-only):
-//   /                              → Model Studio (App)
+// Screens (lobby is the front door now):
+//   /                              → Lobby — pick character, invite, Play
+//   /#studio                       → Model Studio (App) — animation-only playground
 //   /?game                         → full FPS — movement/hitscan/combat/HUD/bots (GameScene)
 //   /?game2  or  /#game            → Akhil's arena prototype (GameView)
 //   /#caster                       → Tier 1 AI caster demo against mock kill stream
@@ -36,7 +38,8 @@ function Root() {
   if (hash === "#leaderboard") return <Leaderboard />;
   if (hash === "#multiplayer") return <MultiplayerGame />;
   if (hash === "#spectator" || hash === "#spectator/freefly") return <SpectatorRoute />;
-  return <App />;
+  if (hash === "#studio") return <App />;
+  return <Lobby />;
 }
 
 ReactDOM.createRoot(document.getElementById("root")!).render(

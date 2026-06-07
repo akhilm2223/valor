@@ -15,6 +15,7 @@
 //                   names + teams without hitting the shots stream's tiny payload.
 
 import type { ValorConnection, Shot, GameMatch, Player } from "../net/Connection";
+import { displayName } from "../net/playerModel";
 import type { KillEvent, Team } from "./MockMatch";
 
 // Re-export so callers can `import { KillEvent } from "../caster/LiveStream"`
@@ -90,7 +91,8 @@ export function createLiveKillStream(
   }
 
   function nameFor(id: number, fallback: string): string {
-    return findPlayer(id)?.name ?? fallback;
+    const p = findPlayer(id);
+    return p ? displayName(p.name) : fallback;
   }
 
   // ---- shots → KillEvent ---------------------------------------------------
@@ -115,7 +117,7 @@ export function createLiveKillStream(
 
     const shooter = findPlayer(shooterId);
     if (!shooter) return; // can't render a name → drop quietly
-    const killerName = shooter.name || `P${shooterId}`;
+    const killerName = displayName(shooter.name) || `P${shooterId}`;
     const victimName = nameFor(victimId, `P${victimId}`);
     const killerTeam = teamFromU8(shooter.team);
 

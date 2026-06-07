@@ -99,16 +99,20 @@ export type AnimState =
 
 /** GLB clip for each anim state. Agent B (AnimatedCharacter) preloads these and
  *  crossfades on state change. `idle` uses the gun-ready aiming pose. */
+// The `?v=2` is a CACHE BUSTER. The first deploy was 41 MB and some clip GLBs
+// got cached half-propagated (corrupt) by browsers/CDN. `must-revalidate` didn't
+// dislodge them. Bumping the query string makes the URL "new" so every client
+// fetches a clean copy. Bump again if a clip is ever cached bad in the future.
 export const ANIM_CLIPS: Record<AnimState, string> = {
-  idle: "/animations/aiming_idle.glb",
-  walk: "/animations/walking.glb",
-  run: "/animations/rifle_run.glb",
-  strafeLeft: "/animations/strafe_left.glb",
-  strafeRight: "/animations/strafe_right.glb",
-  crouchIdle: "/animations/crouch_idle.glb",
-  fire: "/animations/firing.glb",
-  reload: "/animations/reloading.glb",
-  death: "/animations/dying.glb",
+  idle: "/animations/aiming_idle.glb?v=2",
+  walk: "/animations/walking.glb?v=2",
+  run: "/animations/rifle_run.glb?v=2",
+  strafeLeft: "/animations/strafe_left.glb?v=2",
+  strafeRight: "/animations/strafe_right.glb?v=2",
+  crouchIdle: "/animations/crouch_idle.glb?v=2",
+  fire: "/animations/firing.glb?v=2",
+  reload: "/animations/reloading.glb?v=2",
+  death: "/animations/dying.glb?v=2",
 };
 
 /** Clips that play once (not looped) and that keep the hip Y-translation track

@@ -149,8 +149,13 @@ export function VisionController() {
             numFaces: 1,
             outputFaceBlendshapes: true, // eye-blink scores live here
           });
-        gestureRec = await mkGesture("GPU").catch(() => mkGesture("CPU"));
-        faceRec = await mkFace("GPU").catch(() => mkFace("CPU"));
+        // CPU delegate (not GPU): MediaPipe's GPU delegate spins up its own
+        // WebGL context per model. Alongside R3F's context that exhausts
+        // integrated GPUs (Edge) and crashes the main canvas ("Context Lost" →
+        // black screen). CPU/XNNPACK keeps the GPU free for rendering. The hand
+        // model is already mostly CPU ops, so the cost is small.
+        gestureRec = await mkGesture("CPU").catch(() => mkGesture("GPU"));
+        faceRec = await mkFace("CPU").catch(() => mkFace("GPU"));
 
         setStatus("LEFT hand: ✊0 stop · 1 fwd · 2 back · 3 turn R · 4 turn L · RIGHT ✊ = fire · wink scope");
 

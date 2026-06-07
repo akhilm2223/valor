@@ -27,6 +27,7 @@ import {
   type Shot,
   type Commentary,
 } from "../net/Connection";
+import { stripTags } from "../net/playerModel";
 
 // Fixed vantage. Same flavor as the in-game spectator cam but a bit higher so
 // the whole arena reads from the big-screen view.
@@ -310,7 +311,7 @@ function CommentaryBar({ commentary }: { commentary: Commentary | null }) {
       <span style={{ opacity: 0.7, marginRight: 8, fontStyle: "normal", fontSize: 11, letterSpacing: 0.7 }}>
         COMMENTARY
       </span>
-      {commentary.text}
+      {stripTags(commentary.text)}
     </div>
   );
 }

@@ -23,7 +23,8 @@
 
 import { Component, type ReactNode, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { Raycaster, Vector3, MathUtils, MeshLambertMaterial, type Group, type PerspectiveCamera, type Mesh, type MeshStandardMaterial, type Material } from "three";
+import { Sky, Environment } from "@react-three/drei";
+import { Raycaster, Vector3, MathUtils, type Group, type PerspectiveCamera } from "three";
 import { Arena, FitModel } from "../Models";
 import { Scatter } from "../Scatter";
 import { Gun } from "../Gun";
@@ -287,48 +288,6 @@ function RemotePlayerRig({
       </mesh>
     </group>
   );
-}
-
-// Strip "beauty" off the map for pure performance. The arena GLB ships PBR
-// materials (MeshStandardMaterial) whose metalness/roughness specular is the
-// shiny/glossy look — and a costly per-pixel shader. Convert every arena/Scatter
-// mesh to flat matte MeshLambertMaterial: no specular, far cheaper shader, runs
-// on weak GPUs. Keeps the diffuse texture + colour so the map still reads. Runs
-// the first ~3s (to also catch Scatter's async props), idempotent, then stops.
-function MatteMap({ groupRef }: { groupRef: React.RefObject<Group | null> }) {
-  const frames = useRef(0);
-  useFrame(() => {
-    if (frames.current > 180) return; // ~3s at 60fps, then leave it alone
-    frames.current++;
-    const g = groupRef.current;
-    if (!g) return;
-    g.traverse((o) => {
-      const mesh = o as Mesh;
-      if (!(mesh as unknown as { isMesh?: boolean }).isMesh) return;
-      if (mesh.userData.matte) return;
-      const convert = (m: Material): Material => {
-        const std = m as MeshStandardMaterial;
-        if (!std.isMeshStandardMaterial) return m;
-        const lam = new MeshLambertMaterial({
-          map: std.map ?? null,
-          color: std.color,
-          vertexColors: std.vertexColors,
-          transparent: std.transparent,
-          opacity: std.opacity,
-          alphaTest: std.alphaTest,
-          side: std.side,
-          name: std.name,
-        });
-        std.dispose(); // free the PBR shader/uniforms from the GPU
-        return lam;
-      };
-      mesh.material = Array.isArray(mesh.material)
-        ? mesh.material.map(convert)
-        : convert(mesh.material);
-      mesh.userData.matte = true;
-    });
-  });
-  return null;
 }
 
 // Mounts useSpectatorCam inside the Canvas (the hook needs useFrame/useThree).
@@ -1077,22 +1036,24 @@ export function MultiplayerGame() {
             (which caused the "Context Lost" black screen on Edge). */}
         <ContextRecovery />
         <RenderPass />
+        {/* EXACT same lighting as single-player /?game (GameScene.tsx Scene):
+            sky-blue bg + atmospheric Sky + hemisphere + sun + image-based
+            Environment, with the arena's original PBR materials untouched. This
+            is what makes the map look identical to /?game. (Shadow maps are the
+            ONE thing left off — `shadows` on this Canvas + the two MediaPipe
+            webcam contexts black-screened weak GPUs; that's only contact shadows.) */}
         <color attach="background" args={["#bcd4e6"]} />
-        {/* Flat, cheap lighting — NO atmospheric <Sky> shader and NO image-based
-            <Environment> (its PMREM convolution is the "smoothing/shader pack"
-            that made the map look hazy + cost GPU). Strong analytic lights keep
-            the PBR arena bright without those passes: ambient fills every face so
-            nothing renders black, hemisphere tints sky/ground, one directional
-            adds shape. No fog. This is the lighter, cleaner "old map" look. */}
-        <ambientLight intensity={1.5} />
-        <hemisphereLight args={["#dfeaf2", "#6b5a44", 1.1]} />
-        <directionalLight position={[60, 40, 30]} intensity={2.4} />
+        <Sky sunPosition={[60, 18, 40]} turbidity={3} rayleigh={3} mieCoefficient={0.005} mieDirectionalG={0.7} />
+        <hemisphereLight args={["#bcd4e6", "#5a4633", 0.9]} />
+        <directionalLight position={[12, 18, 8]} intensity={2.2} />
+        <Suspense fallback={null}>
+          <Environment preset="city" />
+        </Suspense>
         <Suspense fallback={null}>
           <group ref={arenaRef}>
             <Arena />
             <Scatter />
           </group>
-          <MatteMap groupRef={arenaRef} />{/* flatten arena PBR → cheap matte */}
           {/* First-person: hide our own body while alive (camera sits at the
               eye). Render it when dead so the spectator orbit sees the corpse. */}
           {joined && localPlayer && !localPlayer.alive ? (

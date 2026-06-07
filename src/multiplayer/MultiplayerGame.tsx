@@ -814,10 +814,99 @@ function MatchHud({ match }: { match: GameMatch | undefined }) {
   );
 }
 
+// Bottom-left radar minimap. Top-down view of the arena showing every alive
+// player as an arrow that points where they're FACING. You = white, teammates =
+// green, enemies = red. Reads the live `byId` map in its own rAF loop (the data
+// already updates ~30Hz from the server) and draws a cheap 2D canvas — no React
+// churn. World X→right, Z→down; ±MINI_HALF metres fills the dial.
+const MINI_SIZE = 150;
+const MINI_HALF = 17; // world metres from centre to the dial edge
+
+function Minimap({
+  byId,
+  localId,
+  localTeam,
+}: {
+  byId: React.MutableRefObject<Map<number, Player>>;
+  localId?: number;
+  localTeam?: number;
+}) {
+  const ref = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    let raf = 0;
+    const R = MINI_SIZE / 2;
+    const PAD = 12;
+    const span = R - PAD;
+    const toXY = (wx: number, wz: number): [number, number] => [
+      Math.max(PAD, Math.min(MINI_SIZE - PAD, R + (wx / MINI_HALF) * span)),
+      Math.max(PAD, Math.min(MINI_SIZE - PAD, R + (wz / MINI_HALF) * span)),
+    ];
+    const draw = () => {
+      const c = ref.current;
+      const g = c?.getContext("2d");
+      if (c && g) {
+        g.clearRect(0, 0, MINI_SIZE, MINI_SIZE);
+        // dial bg + border
+        g.fillStyle = "rgba(10,14,18,0.6)";
+        g.strokeStyle = "rgba(255,255,255,0.14)";
+        g.lineWidth = 1;
+        g.beginPath();
+        g.arc(R, R, R - 1, 0, Math.PI * 2);
+        g.fill();
+        g.stroke();
+        // faint cross
+        g.strokeStyle = "rgba(255,255,255,0.08)";
+        g.beginPath();
+        g.moveTo(R, PAD); g.lineTo(R, MINI_SIZE - PAD);
+        g.moveTo(PAD, R); g.lineTo(MINI_SIZE - PAD, R);
+        g.stroke();
+        // players
+        for (const p of byId.current.values()) {
+          if (!p.alive) continue;
+          const [x, y] = toXY(p.position.x, p.position.z);
+          const isLocal = p.id === localId;
+          const enemy = localTeam !== undefined && p.team !== localTeam;
+          const color = isLocal ? "#ffffff" : enemy ? "#ff5b5b" : "#4ad66d";
+          // facing arrow (world aim_vector → minimap dir; x→right, z→down)
+          let dx = p.aimVector.x, dz = p.aimVector.z;
+          const fl = Math.hypot(dx, dz) || 1;
+          dx /= fl; dz /= fl;
+          const px = -dz, pz = dx; // perpendicular
+          const s = isLocal ? 7 : 5.5;
+          g.fillStyle = color;
+          g.beginPath();
+          g.moveTo(x + dx * s, y + dz * s); // tip = facing
+          g.lineTo(x - dx * s * 0.7 + px * s * 0.7, y - dz * s * 0.7 + pz * s * 0.7);
+          g.lineTo(x - dx * s * 0.7 - px * s * 0.7, y - dz * s * 0.7 - pz * s * 0.7);
+          g.closePath();
+          g.fill();
+          if (isLocal) {
+            g.strokeStyle = "rgba(0,0,0,0.6)";
+            g.lineWidth = 1;
+            g.stroke();
+          }
+        }
+      }
+      raf = requestAnimationFrame(draw);
+    };
+    raf = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(raf);
+  }, [byId, localId, localTeam]);
+  return (
+    <canvas
+      ref={ref}
+      width={MINI_SIZE}
+      height={MINI_SIZE}
+      style={{ position: "absolute", bottom: 16, left: 16, width: MINI_SIZE, height: MINI_SIZE, zIndex: 6, pointerEvents: "none" }}
+    />
+  );
+}
+
 function PlayerHud({ player }: { player: Player | undefined }) {
   if (!player) return null;
   return (
-    <div style={hudBottomLeft}>
+    // Bottom-CENTER so it doesn't collide with the minimap (bottom-left).
+    <div style={hudBottomCenter}>
       <div style={hudLabel}>{decodeName(player.name).name.toUpperCase()}</div>
       <div style={{ display: "flex", gap: 14, marginTop: 4 }}>
         <span style={{ color: player.health > 30 ? "#9be7a3" : "#ff8a6e", fontWeight: 700 }}>
@@ -1345,6 +1434,7 @@ export function MultiplayerGame() {
 
       <MatchHud match={match} />
       <PlayerHud player={localPlayer} />
+      {inMatch ? <Minimap byId={byId} localId={localPlayer?.id} localTeam={localPlayer?.team} /> : null}
       <KillFeed kills={shots} playersById={playersById} />
       <SpectatorOverlay localPlayer={localPlayer} match={match} />
       <MatchBanner match={match} players={players} />
@@ -1402,7 +1492,7 @@ const hudBase: React.CSSProperties = {
 
 const hudTopLeft: React.CSSProperties = { ...hudBase, top: 16, left: 16, minWidth: 180 };
 const hudTopRight: React.CSSProperties = { ...hudBase, top: 16, right: 16, minWidth: 180 };
-const hudBottomLeft: React.CSSProperties = { ...hudBase, bottom: 16, left: 16, minWidth: 180 };
+const hudBottomCenter: React.CSSProperties = { ...hudBase, bottom: 16, left: "50%", transform: "translateX(-50%)", textAlign: "center" };
 
 const hudLabel: React.CSSProperties = {
   fontSize: 10,
